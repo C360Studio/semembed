@@ -1,0 +1,49 @@
+# SemEmbed - Local Development
+# Standalone docker-compose for testing semembed without full SemStreams stack
+
+version: '3.8'
+
+services:
+  semembed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: semstreams-semembed:dev
+    container_name: semembed-dev
+    ports:
+      - "8081:8081"
+    environment:
+      # Model configuration
+      - SEMEMBED_MODEL=BAAI/bge-small-en-v1.5  # 384 dims, fast, good quality
+      # Alternative models:
+      # - SEMEMBED_MODEL=BAAI/bge-base-en-v1.5  # 768 dims, higher quality
+      # - SEMEMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2  # 384 dims, very fast
+
+      # Server configuration
+      - SEMEMBED_PORT=8081
+
+      # Logging
+      - RUST_LOG=info  # Options: debug, info, warn, error
+    volumes:
+      # Persist model cache to avoid re-downloading
+      - semembed-cache:/home/semembed/.cache/fastembed
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s  # Allow time for model download
+    restart: unless-stopped
+    # Resource limits (smaller footprint than TEI)
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '2.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+
+volumes:
+  semembed-cache:
+    driver: local
