@@ -2,13 +2,14 @@
 
 Lightweight HTTP embedding service for SemStreams using [fastembed-rs](https://github.com/Anush008/fastembed-rs).
 
-**📚 Ecosystem Documentation**: For SemStreams architecture, integration guides, and deployment strategies, see [semdocs](https://github.com/c360/semdocs). This README covers semembed implementation details.
+**📚 Ecosystem Documentation**: For SemStreams architecture, integration guides, and deployment strategies, see [semdocs](https://github.com/C360Studio/semdocs). This README covers semembed implementation details.
 
 ## Overview
 
 `semembed` provides text embeddings via an OpenAI-compatible HTTP API (`/v1/embeddings`). It replaces the previous Go+ONNX implementation with a simpler Rust service that handles all model management, tokenization, and ONNX Runtime complexity internally.
 
 **Key Benefits**:
+
 - Multi-architecture support (linux/amd64, linux/arm64) without emulation
 - Automatic model downloading and caching
 - OpenAI-compatible API for drop-in replacement
@@ -20,6 +21,7 @@ Lightweight HTTP embedding service for SemStreams using [fastembed-rs](https://g
 **No local Rust required!** All development uses Docker to avoid toolchain setup.
 
 **Quick Start**:
+
 ```bash
 # Build and run service
 task dev
@@ -77,6 +79,7 @@ docker run -p 8081:8081 \
 OpenAI-compatible embedding generation endpoint.
 
 **Request**:
+
 ```json
 {
   "input": "Text to embed",
@@ -86,10 +89,12 @@ OpenAI-compatible embedding generation endpoint.
 ```
 
 **Input field types**:
+
 - Single string: `"input": "text"`
 - Array of strings: `"input": ["text1", "text2"]`
 
 **Response**:
+
 ```json
 {
   "object": "list",
@@ -113,6 +118,7 @@ OpenAI-compatible embedding generation endpoint.
 Health check endpoint for container orchestration.
 
 **Response**:
+
 ```json
 {
   "status": "healthy",
@@ -125,6 +131,7 @@ Health check endpoint for container orchestration.
 List loaded models endpoint.
 
 **Response**:
+
 ```json
 {
   "models": ["BAAI/bge-small-en-v1.5"]
@@ -136,6 +143,7 @@ List loaded models endpoint.
 Prometheus metrics endpoint.
 
 **Metrics**:
+
 - `semembed_requests_total` - Total embedding requests
 - `semembed_request_duration_seconds` - Request latency histogram
 - `semembed_tokens_processed_total` - Total tokens processed
@@ -171,7 +179,7 @@ docker run -p 8081:8081 \
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────┐
 │   SemStreams Graph Processor    │
 │   - HTTP Embedding Client       │
@@ -265,6 +273,7 @@ docker compose down
 ```
 
 Or use Task shortcuts:
+
 ```bash
 task compose:up
 task compose:logs
@@ -316,41 +325,16 @@ docker buildx build \
   --push .
 ```
 
-## Migration from Old Go+ONNX Implementation
-
-The new Rust service replaces the previous Go implementation that used:
-- `knights-analytics/hugot` for ONNX inference
-- Manual model downloading
-- Custom HTTP API
-- TEI for containerized deployments (linux/amd64 only)
-
-**Benefits of new implementation**:
-1. **Simpler**: fastembed-rs handles all complexity
-2. **Faster**: Native Rust performance
-3. **Smaller**: Lower memory footprint
-4. **Multi-arch**: Works on ARM64 and AMD64 natively
-5. **Standard**: OpenAI-compatible API
-
-## Performance
-
-Typical performance on various platforms:
-
-| Platform | Model | Latency (single) | Throughput (batch-32) |
-|----------|-------|------------------|----------------------|
-| Apple M1 | bge-small-en-v1.5 | ~5ms | ~150ms |
-| AMD64 4-core | bge-small-en-v1.5 | ~10ms | ~300ms |
-| ARM64 2-core | bge-small-en-v1.5 | ~20ms | ~600ms |
-
-*Benchmarks are approximate and depend on text length and hardware*
-
 ## Resource Requirements
 
 **Minimum**:
+
 - 512MB RAM
 - 1 CPU core
 - 500MB disk space (model cache)
 
 **Recommended**:
+
 - 1GB RAM
 - 2 CPU cores
 - 1GB disk space
@@ -360,6 +344,7 @@ Typical performance on various platforms:
 ### Model Download Fails
 
 Models are downloaded on first startup. Ensure:
+
 - Container has internet access
 - Sufficient disk space for model cache
 - `~/.cache/fastembed` directory is writable
@@ -367,6 +352,7 @@ Models are downloaded on first startup. Ensure:
 ### Out of Memory
 
 Reduce memory usage by:
+
 - Using smaller model (all-MiniLM-L6-v2)
 - Limiting container memory: `docker run -m 512M`
 - Reducing batch sizes in client
@@ -374,6 +360,7 @@ Reduce memory usage by:
 ### Slow Performance
 
 Improve performance by:
+
 - Allocating more CPU cores
 - Using larger model on powerful hardware
 - Batching requests when possible
@@ -381,28 +368,26 @@ Improve performance by:
 ## CI/CD
 
 GitHub Actions workflow automatically:
+
 - Builds Docker image
 - Runs health checks
 - Tests all endpoints (single, batch embeddings)
-- Security scanning (Trivy)
-- Dockerfile linting (Hadolint)
 
 **Workflow**: `.github/workflows/ci.yml`
 
 **Run CI locally**:
+
 ```bash
 task ci:test
 ```
 
 ## License
 
-Same as parent SemStreams project.
+MIT
 
 ## Related
 
-- [QUICKSTART.md](./QUICKSTART.md) - 5-minute getting started guide
 - [Taskfile.yml](./Taskfile.yml) - Development automation tasks
 - [fastembed-rs](https://github.com/Anush008/fastembed-rs) - Rust embedding library
-- [SemStreams](../semstreams/) - Core framework
-- [Graph Processor](../semstreams/processor/graph/) - Primary consumer
+- [SemStreams](https://github.com/C360Studio/semstreams) - Core framework
 - [Taskfile Documentation](https://taskfile.dev) - Task runner docs
