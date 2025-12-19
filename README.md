@@ -2,8 +2,6 @@
 
 Lightweight HTTP embedding service for SemStreams using [fastembed-rs](https://github.com/Anush008/fastembed-rs).
 
-**📚 Ecosystem Documentation**: For SemStreams architecture, integration guides, and deployment strategies, see [semdocs](https://github.com/C360Studio/semdocs). This README covers semembed implementation details.
-
 ## Overview
 
 `semembed` provides text embeddings via an OpenAI-compatible HTTP API (`/v1/embeddings`). It replaces the previous Go+ONNX implementation with a simpler Rust service that handles all model management, tokenization, and ONNX Runtime complexity internally.
