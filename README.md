@@ -4,8 +4,7 @@ Lightweight HTTP embedding service for SemStreams using [fastembed-rs](https://g
 
 ## Overview
 
-`semembed` provides text embeddings via an OpenAI-compatible HTTP API (`/v1/embeddings`). It replaces the previous Go+ONNX implementation with a simpler Rust service that handles all model management, tokenization, and ONNX Runtime complexity internally.
-
+`semembed` provides text embeddings via an OpenAI-compatible HTTP API (`/v1/embeddings`).
 **Key Benefits**:
 
 - Multi-architecture support (linux/amd64, linux/arm64) without emulation
