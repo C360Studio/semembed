@@ -41,7 +41,7 @@ tasks:
         docker run -d \
           --name {{.CONTAINER_NAME}} \
           -p {{.PORT}}:{{.PORT}} \
-          -e SEMEMBED_MODEL=BAAI/bge-small-en-v1.5 \
+          -e SEMEMBED_MODEL=Snowflake/snowflake-arctic-embed-s \
           -e SEMEMBED_PORT={{.PORT}} \
           -e RUST_LOG=info \
           -v semembed-cache:/home/semembed/.cache/fastembed \
@@ -59,43 +59,59 @@ tasks:
         docker run --rm \
           --name {{.CONTAINER_NAME}} \
           -p {{.PORT}}:{{.PORT}} \
+          -e SEMEMBED_MODEL=Snowflake/snowflake-arctic-embed-s \
+          -e SEMEMBED_PORT={{.PORT}} \
+          -e RUST_LOG=info \
+          -v semembed-cache:/home/semembed/.cache/fastembed \
+          {{.IMAGE_NAME}}:latest
+
+  run:arctic-xs:
+    desc: Run with snowflake-arctic-embed-xs (22M params, smallest/fastest)
+    deps: [build]
+    cmds:
+      - docker rm -f {{.CONTAINER_NAME}} 2>/dev/null || true
+      - |
+        docker run -d \
+          --name {{.CONTAINER_NAME}} \
+          -p {{.PORT}}:{{.PORT}} \
+          -e SEMEMBED_MODEL=Snowflake/snowflake-arctic-embed-xs \
+          -e SEMEMBED_PORT={{.PORT}} \
+          -e RUST_LOG=info \
+          -v semembed-cache:/home/semembed/.cache/fastembed \
+          {{.IMAGE_NAME}}:latest
+      - echo "✅ Service running with snowflake-arctic-embed-xs model"
+
+  run:arctic-m:
+    desc: Run with snowflake-arctic-embed-m (110M params, higher quality)
+    deps: [build]
+    cmds:
+      - docker rm -f {{.CONTAINER_NAME}} 2>/dev/null || true
+      - |
+        docker run -d \
+          --name {{.CONTAINER_NAME}} \
+          -p {{.PORT}}:{{.PORT}} \
+          -e SEMEMBED_MODEL=Snowflake/snowflake-arctic-embed-m \
+          -e SEMEMBED_PORT={{.PORT}} \
+          -e RUST_LOG=info \
+          -v semembed-cache:/home/semembed/.cache/fastembed \
+          {{.IMAGE_NAME}}:latest
+      - echo "✅ Service running with snowflake-arctic-embed-m model"
+
+  run:bge-small:
+    desc: Run with bge-small-en-v1.5 (prior default, kept for backwards compat)
+    deps: [build]
+    cmds:
+      - docker rm -f {{.CONTAINER_NAME}} 2>/dev/null || true
+      - |
+        docker run -d \
+          --name {{.CONTAINER_NAME}} \
+          -p {{.PORT}}:{{.PORT}} \
           -e SEMEMBED_MODEL=BAAI/bge-small-en-v1.5 \
           -e SEMEMBED_PORT={{.PORT}} \
           -e RUST_LOG=info \
           -v semembed-cache:/home/semembed/.cache/fastembed \
           {{.IMAGE_NAME}}:latest
-
-  run:base:
-    desc: Run with bge-base-en-v1.5 model (higher quality)
-    deps: [build]
-    cmds:
-      - docker rm -f {{.CONTAINER_NAME}} 2>/dev/null || true
-      - |
-        docker run -d \
-          --name {{.CONTAINER_NAME}} \
-          -p {{.PORT}}:{{.PORT}} \
-          -e SEMEMBED_MODEL=BAAI/bge-base-en-v1.5 \
-          -e SEMEMBED_PORT={{.PORT}} \
-          -e RUST_LOG=info \
-          -v semembed-cache:/home/semembed/.cache/fastembed \
-          {{.IMAGE_NAME}}:latest
-      - echo "✅ Service running with bge-base-en-v1.5 model"
-
-  run:minilm:
-    desc: Run with all-MiniLM-L6-v2 model (fast, lightweight)
-    deps: [build]
-    cmds:
-      - docker rm -f {{.CONTAINER_NAME}} 2>/dev/null || true
-      - |
-        docker run -d \
-          --name {{.CONTAINER_NAME}} \
-          -p {{.PORT}}:{{.PORT}} \
-          -e SEMEMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2 \
-          -e SEMEMBED_PORT={{.PORT}} \
-          -e RUST_LOG=info \
-          -v semembed-cache:/home/semembed/.cache/fastembed \
-          {{.IMAGE_NAME}}:latest
-      - echo "✅ Service running with all-MiniLM-L6-v2 model"
+      - echo "✅ Service running with bge-small-en-v1.5 model"
 
   # Test tasks
   test:health:
@@ -114,7 +130,7 @@ tasks:
           -H "Content-Type: application/json" \
           -d '{
             "input": "This is a test sentence for embedding",
-            "model": "BAAI/bge-small-en-v1.5"
+            "model": "Snowflake/snowflake-arctic-embed-s"
           }' || (echo "❌ Embeddings test failed" && exit 1)
       - echo ""
       - echo "✅ Embeddings test passed"
@@ -128,7 +144,7 @@ tasks:
           -H "Content-Type: application/json" \
           -d '{
             "input": ["First sentence", "Second sentence", "Third sentence"],
-            "model": "BAAI/bge-small-en-v1.5"
+            "model": "Snowflake/snowflake-arctic-embed-s"
           }' || (echo "❌ Batch embeddings test failed" && exit 1)
       - echo ""
       - echo "✅ Batch embeddings test passed"
@@ -281,8 +297,9 @@ tasks:
         echo "  task build            # Build Docker image"
         echo "  task run              # Run service (background)"
         echo "  task run:fg           # Run service (foreground)"
-        echo "  task run:base         # Run with bge-base model"
-        echo "  task run:minilm       # Run with MiniLM model"
+        echo "  task run:arctic-xs    # Run with arctic-embed-xs (smaller/faster)"
+        echo "  task run:arctic-m     # Run with arctic-embed-m (higher quality)"
+        echo "  task run:bge-small    # Run with bge-small (prior default)"
         echo "  task stop             # Stop service"
         echo ""
         echo "Testing:"

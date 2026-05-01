@@ -7,12 +7,11 @@ description = "Lightweight HTTP embedding service using fastembed-rs with OpenAI
 
 [dependencies]
 # HTTP server
-axum = "0.7"
+axum = "0.8"
 tokio = { version = "1", features = ["full"] }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["trace", "cors"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
 
-# Embeddings (use latest version for Rust 1.85 compatibility)
+# Embeddings
 fastembed = "5"
 
 # Serialization
@@ -21,14 +20,13 @@ serde_json = "1"
 
 # Error handling
 anyhow = "1"
-thiserror = "1"
 
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Metrics
-prometheus = "0.13"
+prometheus = "0.14"
 
 [profile.release]
 lto = true

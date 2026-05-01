@@ -10,7 +10,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: c360studio/semembed
-  RUST_VERSION: "1.85"
+  RUST_VERSION: "1.95"
 
 jobs:
   build:
@@ -48,7 +48,7 @@ jobs:
           docker run -d \
             --name semembed-test \
             -p 8081:8081 \
-            -e SEMEMBED_MODEL=BAAI/bge-small-en-v1.5 \
+            -e SEMEMBED_MODEL=Snowflake/snowflake-arctic-embed-s \
             -e SEMEMBED_PORT=8081 \
             -e RUST_LOG=info \
             semembed:test
@@ -79,7 +79,7 @@ jobs:
           response=$(curl -s http://localhost:8081/models)
           echo "Models response: $response"
           echo "$response" | grep -q '"models"' || exit 1
-          echo "$response" | grep -q 'BAAI/bge-small-en-v1.5' || exit 1
+          echo "$response" | grep -q 'Snowflake/snowflake-arctic-embed-s' || exit 1
 
       - name: Test embeddings endpoint (single input)
         run: |
@@ -87,13 +87,13 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{
               "input": "This is a test sentence for embedding",
-              "model": "BAAI/bge-small-en-v1.5"
+              "model": "Snowflake/snowflake-arctic-embed-s"
             }')
           echo "Single embedding response:"
           echo "$response" | head -c 200
           echo "..."
           echo "$response" | grep -q '"object":"list"' || exit 1
-          echo "$response" | grep -q '"model":"BAAI/bge-small-en-v1.5"' || exit 1
+          echo "$response" | grep -q '"model":"Snowflake/snowflake-arctic-embed-s"' || exit 1
 
       - name: Test embeddings endpoint (batch input)
         run: |
@@ -101,7 +101,7 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{
               "input": ["First sentence", "Second sentence", "Third sentence"],
-              "model": "BAAI/bge-small-en-v1.5"
+              "model": "Snowflake/snowflake-arctic-embed-s"
             }')
           echo "Batch embedding response:"
           echo "$response" | head -c 200

@@ -3,7 +3,11 @@
 # Uses fastembed-rs which handles model download and ONNX complexity
 
 # Stage 1: Cargo chef planner
-FROM rust:1.85-slim AS chef
+# Builder and runtime are both pinned to Debian Trixie. fastembed's
+# prebuilt ONNX Runtime requires glibc 2.38+ and libstdc++13 symbols
+# (__isoc23_strtol, __cxa_call_terminate), so an older base on either
+# side breaks linking or execution.
+FROM rust:1.95-slim-trixie AS chef
 # Install build dependencies for OpenSSL and C++ (for ONNX Runtime)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -31,7 +35,7 @@ COPY src ./src
 RUN cargo build --release --bin semembed
 
 # Stage 5: Runtime image
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 # Install runtime dependencies
 RUN apt-get update && \
@@ -56,7 +60,7 @@ RUN chown -R semembed:semembed /app
 USER semembed
 
 # Environment variables with defaults
-ENV SEMEMBED_MODEL=BAAI/bge-small-en-v1.5
+ENV SEMEMBED_MODEL=Snowflake/snowflake-arctic-embed-s
 ENV SEMEMBED_PORT=8081
 ENV RUST_LOG=info
 

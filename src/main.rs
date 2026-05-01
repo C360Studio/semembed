@@ -151,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Get configuration from environment
     let model_name = std::env::var("SEMEMBED_MODEL")
-        .unwrap_or_else(|_| "BAAI/bge-small-en-v1.5".to_string());
+        .unwrap_or_else(|_| "Snowflake/snowflake-arctic-embed-s".to_string());
     let port = std::env::var("SEMEMBED_PORT")
         .unwrap_or_else(|_| "8081".to_string())
         .parse::<u16>()?;
@@ -160,12 +160,15 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize fastembed model
     let model = match model_name.as_str() {
+        "Snowflake/snowflake-arctic-embed-s" => EmbeddingModel::SnowflakeArcticEmbedS,
+        "Snowflake/snowflake-arctic-embed-xs" => EmbeddingModel::SnowflakeArcticEmbedXS,
+        "Snowflake/snowflake-arctic-embed-m" => EmbeddingModel::SnowflakeArcticEmbedM,
         "BAAI/bge-small-en-v1.5" => EmbeddingModel::BGESmallENV15,
         "BAAI/bge-base-en-v1.5" => EmbeddingModel::BGEBaseENV15,
         "sentence-transformers/all-MiniLM-L6-v2" => EmbeddingModel::AllMiniLML6V2,
         _ => {
-            warn!("Unknown model {}, defaulting to BGESmallENV15", model_name);
-            EmbeddingModel::BGESmallENV15
+            warn!("Unknown model {}, defaulting to SnowflakeArcticEmbedS", model_name);
+            EmbeddingModel::SnowflakeArcticEmbedS
         }
     };
 

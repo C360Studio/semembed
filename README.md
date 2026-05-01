@@ -41,7 +41,7 @@ See [Taskfile.yml](./Taskfile.yml) for all available tasks.
 ### Using Docker Compose
 
 ```bash
-# Start with default model (BAAI/bge-small-en-v1.5)
+# Start with default model (Snowflake/snowflake-arctic-embed-s)
 docker compose -f docker-compose.services.yml --profile embedding up -d
 
 # Check health
@@ -52,7 +52,7 @@ curl http://localhost:8081/v1/embeddings \
   -H "Content-Type: application/json" \
   -d '{
     "input": "Hello world",
-    "model": "BAAI/bge-small-en-v1.5"
+    "model": "Snowflake/snowflake-arctic-embed-s"
   }'
 ```
 
@@ -64,7 +64,7 @@ docker build -t semstreams-semembed:latest .
 
 # Run container
 docker run -p 8081:8081 \
-  -e SEMEMBED_MODEL=BAAI/bge-small-en-v1.5 \
+  -e SEMEMBED_MODEL=Snowflake/snowflake-arctic-embed-s \
   -e RUST_LOG=info \
   semstreams-semembed:latest
 ```
@@ -80,7 +80,7 @@ OpenAI-compatible embedding generation endpoint.
 ```json
 {
   "input": "Text to embed",
-  "model": "BAAI/bge-small-en-v1.5",
+  "model": "Snowflake/snowflake-arctic-embed-s",
   "encoding_format": "float"
 }
 ```
@@ -102,7 +102,7 @@ OpenAI-compatible embedding generation endpoint.
       "index": 0
     }
   ],
-  "model": "BAAI/bge-small-en-v1.5",
+  "model": "Snowflake/snowflake-arctic-embed-s",
   "usage": {
     "prompt_tokens": 5,
     "total_tokens": 5
@@ -119,7 +119,7 @@ Health check endpoint for container orchestration.
 ```json
 {
   "status": "healthy",
-  "model": "BAAI/bge-small-en-v1.5"
+  "model": "Snowflake/snowflake-arctic-embed-s"
 }
 ```
 
@@ -131,7 +131,7 @@ List loaded models endpoint.
 
 ```json
 {
-  "models": ["BAAI/bge-small-en-v1.5"]
+  "models": ["Snowflake/snowflake-arctic-embed-s"]
 }
 ```
 
@@ -152,25 +152,37 @@ Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SEMEMBED_MODEL` | `BAAI/bge-small-en-v1.5` | Model to use (see supported models) |
+| `SEMEMBED_MODEL` | `Snowflake/snowflake-arctic-embed-s` | Model to use (see supported models) |
 | `SEMEMBED_PORT` | `8081` | HTTP server port |
 | `RUST_LOG` | `info` | Log level (error, warn, info, debug, trace) |
 
 ## Supported Models
 
-Models are automatically downloaded by fastembed-rs on first startup:
+Models are automatically downloaded by fastembed-rs on first startup. The
+default (`Snowflake/snowflake-arctic-embed-s`) is the strongest option in
+the small/fast tier per the MTEB Retrieval leaderboard (NDCG@10 51.98 vs
+51.68 for `bge-small-en-v1.5`); same 33M params, same 384-dim, same 512
+token context, Apache-2.0.
 
-| Model | Dimensions | Size | Best For |
-|-------|------------|------|----------|
-| `BAAI/bge-small-en-v1.5` | 384 | ~120MB | General purpose, fast |
-| `BAAI/bge-base-en-v1.5` | 768 | ~420MB | Higher quality |
-| `sentence-transformers/all-MiniLM-L6-v2` | 384 | ~90MB | Fast, good quality |
+| Model | Dimensions | Params | Best For |
+|-------|------------|--------|----------|
+| `Snowflake/snowflake-arctic-embed-s` *(default)* | 384 | 33M | Best small-tier retrieval quality |
+| `Snowflake/snowflake-arctic-embed-xs` | 384 | 22M | Smallest/fastest; tightest budgets |
+| `Snowflake/snowflake-arctic-embed-m` | 768 | 110M | Higher quality, ~3× the cost |
+| `BAAI/bge-small-en-v1.5` | 384 | 33M | Prior default, kept for compat |
+| `BAAI/bge-base-en-v1.5` | 768 | 109M | Prior higher-quality option |
+| `sentence-transformers/all-MiniLM-L6-v2` | 384 | 22M | Baseline; outperformed by arctic-xs |
+
+> **Vector compatibility**: switching models produces incompatible
+> embedding spaces. Vectors from one model cannot be compared with
+> vectors from another. If you have persisted embeddings, re-embed them
+> after changing the model.
 
 To change models, set `SEMEMBED_MODEL` environment variable:
 
 ```bash
 docker run -p 8081:8081 \
-  -e SEMEMBED_MODEL=BAAI/bge-base-en-v1.5 \
+  -e SEMEMBED_MODEL=Snowflake/snowflake-arctic-embed-m \
   semstreams-semembed:latest
 ```
 
@@ -208,7 +220,7 @@ The graph processor's indexmanager can use semembed for semantic search:
 # Environment variables for semstreams
 EMBEDDING_PROVIDER=http
 EMBEDDING_HTTP_ENDPOINT=http://semembed:8081/v1/embeddings
-EMBEDDING_HTTP_MODEL=BAAI/bge-small-en-v1.5
+EMBEDDING_HTTP_MODEL=Snowflake/snowflake-arctic-embed-s
 ```
 
 See `processor/graph/indexmanager/embedding/http_embedder.go` for implementation.
@@ -233,8 +245,9 @@ task run
 task run:fg
 
 # Run with different models
-task run:base           # bge-base-en-v1.5 (higher quality)
-task run:minilm         # all-MiniLM-L6-v2 (faster)
+task run:arctic-xs      # snowflake-arctic-embed-xs (22M, smallest/fastest)
+task run:arctic-m       # snowflake-arctic-embed-m (110M, higher quality)
+task run:bge-small      # bge-small-en-v1.5 (prior default)
 
 # Test endpoints
 task test:health
@@ -306,7 +319,7 @@ cargo test
 # Test the API
 curl -X POST http://localhost:8081/v1/embeddings \
   -H "Content-Type: application/json" \
-  -d '{"input": ["test text"], "model": "BAAI/bge-small-en-v1.5"}'
+  -d '{"input": ["test text"], "model": "Snowflake/snowflake-arctic-embed-s"}'
 ```
 
 ### Building Multi-Arch Images
