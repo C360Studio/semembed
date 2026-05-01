@@ -3,7 +3,7 @@
 # Uses fastembed-rs which handles model download and ONNX complexity
 
 # Stage 1: Cargo chef planner
-FROM rust:1.85-slim AS chef
+FROM rust:1.95-slim AS chef
 # Install build dependencies for OpenSSL and C++ (for ONNX Runtime)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -56,7 +56,7 @@ RUN chown -R semembed:semembed /app
 USER semembed
 
 # Environment variables with defaults
-ENV SEMEMBED_MODEL=BAAI/bge-small-en-v1.5
+ENV SEMEMBED_MODEL=Snowflake/snowflake-arctic-embed-s
 ENV SEMEMBED_PORT=8081
 ENV RUST_LOG=info
 
