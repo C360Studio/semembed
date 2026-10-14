@@ -5,7 +5,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use prometheus::{Encoder, TextEncoder, Counter, Histogram, Registry, HistogramOpts, Opts};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -163,6 +163,14 @@ async fn main() -> anyhow::Result<()> {
         "Snowflake/snowflake-arctic-embed-s" => EmbeddingModel::SnowflakeArcticEmbedS,
         "Snowflake/snowflake-arctic-embed-xs" => EmbeddingModel::SnowflakeArcticEmbedXS,
         "Snowflake/snowflake-arctic-embed-m" => EmbeddingModel::SnowflakeArcticEmbedM,
+        "Snowflake/snowflake-arctic-embed-m-long" => EmbeddingModel::SnowflakeArcticEmbedMLong,
+        "nomic-ai/nomic-embed-text-v1.5" => EmbeddingModel::NomicEmbedTextV15,
+        "google/embeddinggemma-300m" | "onnx-community/embeddinggemma-300m-ONNX" => {
+            EmbeddingModel::EmbeddingGemma300M
+        }
+        "google/embeddinggemma-300m-q" => EmbeddingModel::EmbeddingGemma300MQ,
+        "google/embeddinggemma-300m-q4" => EmbeddingModel::EmbeddingGemma300MQ4,
+        "lightonai/modernbert-embed-large" => EmbeddingModel::ModernBertEmbedLarge,
         "BAAI/bge-small-en-v1.5" => EmbeddingModel::BGESmallENV15,
         "BAAI/bge-base-en-v1.5" => EmbeddingModel::BGEBaseENV15,
         "sentence-transformers/all-MiniLM-L6-v2" => EmbeddingModel::AllMiniLML6V2,
@@ -172,9 +180,9 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // fastembed v5 API - InitOptions builder pattern
+    // fastembed v7 API - TextInitOptions builder pattern
     let embedder = TextEmbedding::try_new(
-        InitOptions::new(model).with_show_download_progress(true)
+        TextInitOptions::new(model).with_show_download_progress(true)
     )?;
 
     info!("Model loaded successfully");

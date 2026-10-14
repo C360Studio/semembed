@@ -20,7 +20,7 @@ The service is intentionally minimal — one binary, one source file
 - **Language**: Rust 2021 edition, toolchain pinned to `1.95` (Dockerfile + CI)
 - **HTTP**: `axum` 0.8 + `tower-http` 0.6 (CORS + tracing layers)
 - **Async runtime**: `tokio` 1.x with `full` features
-- **Embeddings**: `fastembed` 5.x (downloads model to `~/.cache/fastembed` on first run)
+- **Embeddings**: `fastembed` 7.x (downloads model to `~/.cache/fastembed` on first run)
 - **Metrics**: `prometheus` 0.14 exposed at `/metrics`
 - **Logging**: `tracing` + `tracing-subscriber` with `RUST_LOG` env filter
 - **Errors**: `anyhow::Result` everywhere; no custom error types
@@ -85,9 +85,15 @@ update the README's supported-models table.
 
 **Currently mapped**:
 
-- `Snowflake/snowflake-arctic-embed-s` → `SnowflakeArcticEmbedS` *(default)*
+- `Snowflake/snowflake-arctic-embed-s` → `SnowflakeArcticEmbedS` *(default — 384d)*
 - `Snowflake/snowflake-arctic-embed-xs` → `SnowflakeArcticEmbedXS`
 - `Snowflake/snowflake-arctic-embed-m` → `SnowflakeArcticEmbedM`
+- `Snowflake/snowflake-arctic-embed-m-long` → `SnowflakeArcticEmbedMLong` (8K context, 768d)
+- `nomic-ai/nomic-embed-text-v1.5` → `NomicEmbedTextV15` (8K context, 768d MRL)
+- `google/embeddinggemma-300m` (`onnx-community/embeddinggemma-300m-ONNX`) → `EmbeddingGemma300M`
+- `google/embeddinggemma-300m-q` → `EmbeddingGemma300MQ`
+- `google/embeddinggemma-300m-q4` → `EmbeddingGemma300MQ4`
+- `lightonai/modernbert-embed-large` → `ModernBertEmbedLarge` (8K context, 1024d)
 - `BAAI/bge-small-en-v1.5` → `BGESmallENV15` (prior default, kept for compat)
 - `BAAI/bge-base-en-v1.5` → `BGEBaseENV15`
 - `sentence-transformers/all-MiniLM-L6-v2` → `AllMiniLML6V2`
@@ -95,15 +101,16 @@ update the README's supported-models table.
 ### Why the default is `snowflake-arctic-embed-s`
 
 Same shape as the prior `bge-small-en-v1.5` default (33M params, 384-dim,
-512-token context, Apache-2.0) but slightly higher MTEB Retrieval score
+512-token context, Apache-2.0) and matches downstream 384d index
+requirements, with a slightly higher MTEB Retrieval score
 (NDCG@10 51.98 vs 51.68) and from the actively-maintained Snowflake
-suite that scales up cleanly to `-m` (110M, 768-dim) and `-l` (335M)
-without changing tokenizer family. The lead over bge-small is small
+suite that scales up cleanly to `-m` (110M, 768-dim), `-m-long` (137M,
+8K context), and `-l` (335M) without changing tokenizer family. The lead over bge-small is small
 (~0.30 NDCG) — the better argument is that the Snowflake suite is the
 direction the niche is moving and gives us a coherent upgrade path.
 
-`fastembed-rs` exposes 44 text embedding variants total (see
-`docs.rs/fastembed`); only the six above are reachable today because
+`fastembed-rs` v7 exposes 40+ text embedding variants total (see
+`docs.rs/fastembed`); only the models above are reachable today because
 `SEMEMBED_MODEL` strings are matched literally. Add new arms when a
 caller needs them — don't auto-expose everything.
 

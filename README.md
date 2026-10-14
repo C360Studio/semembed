@@ -164,14 +164,20 @@ the small/fast tier per the MTEB Retrieval leaderboard (NDCG@10 51.98 vs
 51.68 for `bge-small-en-v1.5`); same 33M params, same 384-dim, same 512
 token context, Apache-2.0.
 
-| Model | Dimensions | Params | Best For |
-|-------|------------|--------|----------|
-| `Snowflake/snowflake-arctic-embed-s` *(default)* | 384 | 33M | Best small-tier retrieval quality |
-| `Snowflake/snowflake-arctic-embed-xs` | 384 | 22M | Smallest/fastest; tightest budgets |
-| `Snowflake/snowflake-arctic-embed-m` | 768 | 110M | Higher quality, ~3× the cost |
-| `BAAI/bge-small-en-v1.5` | 384 | 33M | Prior default, kept for compat |
-| `BAAI/bge-base-en-v1.5` | 768 | 109M | Prior higher-quality option |
-| `sentence-transformers/all-MiniLM-L6-v2` | 384 | 22M | Baseline; outperformed by arctic-xs |
+| Model | Dimensions | Params | Context | Best For |
+|-------|------------|--------|---------|----------|
+| `Snowflake/snowflake-arctic-embed-s` *(default)* | 384 | 33M | 512 | Best small-tier 384d retrieval quality |
+| `Snowflake/snowflake-arctic-embed-xs` | 384 | 22M | 512 | Smallest/fastest; tightest budgets |
+| `Snowflake/snowflake-arctic-embed-m` | 768 | 110M | 512 | Higher quality, ~3× the cost |
+| `Snowflake/snowflake-arctic-embed-m-long` | 768 | 137M | 8192 | Long-context retrieval (NDCG@10 54.83) |
+| `nomic-ai/nomic-embed-text-v1.5` | 768 | 137M | 8192 | Long-context with Matryoshka support |
+| `google/embeddinggemma-300m` | 768 | 300M | 2048 | Multilingual (100+ langs) & code retrieval |
+| `google/embeddinggemma-300m-q` | 768 | 300M | 2048 | Quantized EmbeddingGemma for <1GB RAM |
+| `google/embeddinggemma-300m-q4` | 768 | 300M | 2048 | 4-bit quantized EmbeddingGemma |
+| `lightonai/modernbert-embed-large` | 1024 | 395M | 8192 | High overall MTEB (63.84) with 8K context |
+| `BAAI/bge-small-en-v1.5` | 384 | 33M | 512 | Prior default, kept for compat |
+| `BAAI/bge-base-en-v1.5` | 768 | 109M | 512 | Prior higher-quality option |
+| `sentence-transformers/all-MiniLM-L6-v2` | 384 | 22M | 512 | Baseline; outperformed by arctic-xs |
 
 > **Vector compatibility**: switching models produces incompatible
 > embedding spaces. Vectors from one model cannot be compared with
