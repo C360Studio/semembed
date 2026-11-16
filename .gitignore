@@ -9,6 +9,7 @@ ENV/
 .venv/
 
 # Build outputs
+/target
 dist/
 build/
 *.egg-info/

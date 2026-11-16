@@ -43,6 +43,14 @@ jobs:
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
 
+      - name: Run unit tests
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          target: test
+          push: false
+          cache-from: type=local,src=/tmp/.buildx-cache
+
       - name: Start service
         run: |
           docker run -d \
@@ -73,6 +81,7 @@ jobs:
           response=$(curl -s http://localhost:8081/health)
           echo "Health response: $response"
           echo "$response" | grep -q '"status":"healthy"' || exit 1
+          echo "$response" | grep -q '"max_tokens":512' || exit 1
 
       - name: Test models endpoint
         run: |
@@ -80,10 +89,12 @@ jobs:
           echo "Models response: $response"
           echo "$response" | grep -q '"models"' || exit 1
           echo "$response" | grep -q 'Snowflake/snowflake-arctic-embed-s' || exit 1
+          echo "$response" | grep -q '"max_tokens":512' || exit 1
+          echo "$response" | grep -q '"query_prefix":"Represent this sentence for searching relevant passages: "' || exit 1
 
       - name: Test embeddings endpoint (single input)
         run: |
-          response=$(curl -X POST http://localhost:8081/v1/embeddings \
+          response=$(curl -s -X POST http://localhost:8081/v1/embeddings \
             -H "Content-Type: application/json" \
             -d '{
               "input": "This is a test sentence for embedding",
@@ -94,10 +105,15 @@ jobs:
           echo "..."
           echo "$response" | grep -q '"object":"list"' || exit 1
           echo "$response" | grep -q '"model":"Snowflake/snowflake-arctic-embed-s"' || exit 1
+          echo "$response" | grep -q '"prefix_applied":false' || exit 1
+          if echo "$response" | grep -q '"truncated"'; then
+            echo "Unexpected truncated field on short input"
+            exit 1
+          fi
 
       - name: Test embeddings endpoint (batch input)
         run: |
-          response=$(curl -X POST http://localhost:8081/v1/embeddings \
+          response=$(curl -s -X POST http://localhost:8081/v1/embeddings \
             -H "Content-Type: application/json" \
             -d '{
               "input": ["First sentence", "Second sentence", "Third sentence"],
@@ -114,21 +130,224 @@ jobs:
             exit 1
           fi
 
-      - name: Test metrics endpoint
+      - name: Test input_type query vs document prefixing
         run: |
+          python3 - <<'PY'
+          import json, math, urllib.request
+
+          def embed(payload):
+              req = urllib.request.Request(
+                  "http://localhost:8081/v1/embeddings",
+                  data=json.dumps(payload).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              with urllib.request.urlopen(req) as resp:
+                  return json.loads(resp.read())
+
+          def cosine(a, b):
+              dot = sum(x * y for x, y in zip(a, b))
+              na = math.sqrt(sum(x * x for x in a))
+              nb = math.sqrt(sum(y * y for y in b))
+              return dot / (na * nb)
+
+          q = "how do I restart the ingest worker"
+          prefix = "Represent this sentence for searching relevant passages: "
+
+          r_default = embed({"input": q})
+          r_doc = embed({"input": q, "input_type": "document"})
+          r_query = embed({"input": q, "input_type": "query"})
+          r_manual = embed({"input": prefix + q})
+
+          assert r_default["prefix_applied"] is False, r_default
+          assert r_doc["prefix_applied"] is False, r_doc
+          assert r_query["prefix_applied"] is True, r_query
+          assert r_query["usage"]["prompt_tokens"] > r_doc["usage"]["prompt_tokens"]
+
+          v_default = r_default["data"][0]["embedding"]
+          v_doc = r_doc["data"][0]["embedding"]
+          v_query = r_query["data"][0]["embedding"]
+          v_manual = r_manual["data"][0]["embedding"]
+
+          assert cosine(v_default, v_doc) > 0.99999, "omitted input_type must match document"
+          assert cosine(v_query, v_manual) > 0.99999, "query input_type must match manual arctic prefix"
+          assert cosine(v_query, v_doc) < 0.95, "query and document vectors should differ"
+          print("input_type prefix verification passed")
+          PY
+
+      - name: Test truncation detection and metrics
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request
+
+          long_text = " ".join(f"section_{i} alpha beta gamma delta" for i in range(200))
+          payload = {"input": ["short input", long_text]}
+          req = urllib.request.Request(
+              "http://localhost:8081/v1/embeddings",
+              data=json.dumps(payload).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          with urllib.request.urlopen(req) as resp:
+              body = json.loads(resp.read())
+
+          assert "truncated" not in body["data"][0], body["data"][0]
+          assert body["data"][1].get("truncated") is True, body["data"][1]
+          assert body["usage"]["prompt_tokens"] > 512, body["usage"]
+          print("Truncation response check passed:", body["usage"])
+          PY
+
           metrics=$(curl -s http://localhost:8081/metrics)
           echo "Checking metrics..."
           echo "$metrics" | grep -q 'semembed_requests_total' || exit 1
           echo "$metrics" | grep -q 'semembed_request_duration_seconds' || exit 1
           echo "$metrics" | grep -q 'semembed_tokens_processed_total' || exit 1
+          echo "$metrics" | grep -q '^semembed_inputs_truncated_total 1$' || exit 1
 
-      - name: View service logs
-        if: always()
-        run: docker logs semembed-test
+      - name: Test SEMEMBED_MAX_TOKENS lower bound
+        run: |
+          # arctic-embed-s adds 2 special tokens ([CLS], [SEP]): 2 must be refused, 3 is the minimum.
+          docker run -d --name semembed-min-bad -e SEMEMBED_MAX_TOKENS=2 semembed:test
+          status=$(docker wait semembed-min-bad)
+          docker logs semembed-min-bad 2>&1 | tail -5
+          [ "$status" != "0" ] || (echo "Expected startup failure for SEMEMBED_MAX_TOKENS=2" && exit 1)
+          docker logs semembed-min-bad 2>&1 | grep -q 'the minimum is 3' || exit 1
 
-      - name: Stop service
+          docker run -d --name semembed-min-ok -p 8085:8081 -e SEMEMBED_MAX_TOKENS=3 semembed:test
+          for i in {1..60}; do
+            curl -sf http://localhost:8085/health >/dev/null && break
+            sleep 3
+          done
+          curl -sf http://localhost:8085/health | grep -q '"max_tokens":3' || (docker logs semembed-min-ok && exit 1)
+
+          python3 - <<'PY'
+          import json, urllib.request
+          req = urllib.request.Request(
+              "http://localhost:8085/v1/embeddings",
+              data=json.dumps({"input": ["hello", "hello world"]}).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          body = json.loads(urllib.request.urlopen(req).read())
+          assert "truncated" not in body["data"][0], body["data"][0]
+          assert body["data"][1].get("truncated") is True, body["data"][1]
+          assert body["usage"]["prompt_tokens"] == 6, body["usage"]
+          print("SEMEMBED_MAX_TOKENS=3 check passed:", body["usage"])
+          PY
+
+      - name: Cleanup lower-bound containers
         if: always()
-        run: docker rm -f semembed-test
+        run: docker rm -f semembed-min-bad semembed-min-ok 2>/dev/null || true
+
+      - name: View default-model service logs
+        if: always()
+        run: docker logs semembed-test || true
+
+      - name: Stop default-model service
+        if: always()
+        run: docker rm -f semembed-test || true
+
+      - name: Test long-window model (8192 ctx) and SEMEMBED_MAX_TOKENS
+        run: |
+          mkdir -p /tmp/fastembed-cache
+          chmod 0777 /tmp/fastembed-cache
+
+          docker run -d \
+            --name semembed-long \
+            -p 8082:8081 \
+            -e SEMEMBED_MODEL=Snowflake/snowflake-arctic-embed-m-long \
+            -e SEMEMBED_PORT=8081 \
+            -e RUST_LOG=info \
+            -v /tmp/fastembed-cache:/home/semembed/.cache/fastembed \
+            semembed:test
+
+          for i in {1..90}; do
+            if curl -sf http://localhost:8082/health >/dev/null; then
+              break
+            fi
+            sleep 3
+          done
+          curl -sf http://localhost:8082/health | grep -q '"max_tokens":8192' || (docker logs semembed-long && exit 1)
+
+          python3 - <<'PY'
+          import json, math, time, urllib.request
+
+          def embed(payload, port=8082):
+              t0 = time.perf_counter()
+              req = urllib.request.Request(
+                  f"http://localhost:{port}/v1/embeddings",
+                  data=json.dumps(payload).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              with urllib.request.urlopen(req, timeout=300) as resp:
+                  body = json.loads(resp.read())
+              return body, (time.perf_counter() - t0)
+
+          def cosine(a, b):
+              dot = sum(x * y for x, y in zip(a, b))
+              na = math.sqrt(sum(x * x for x in a))
+              nb = math.sqrt(sum(y * y for y in b))
+              return dot / (na * nb)
+
+          # 1. Verify texts > 512 tokens (~1,400 tokens and ~3,500 tokens) change vector when tail changes
+          shared_1k = " ".join(f"paragraph {i} network routing consensus storage stream" for i in range(180))
+          tail_a = " " + " ".join(["kubernetes deployment ingress pod"] * 60)
+          tail_b = " " + " ".join(["postgresql transaction vacuum index"] * 60)
+          res_1k, _ = embed({"input": [shared_1k + tail_a, shared_1k + tail_b]})
+          assert "truncated" not in res_1k["data"][0], res_1k["data"][0]
+          assert "truncated" not in res_1k["data"][1], res_1k["data"][1]
+          sim_1k = cosine(res_1k["data"][0]["embedding"], res_1k["data"][1]["embedding"])
+          print(f"~1.4k-token tail change: prompt_tokens={res_1k['usage']['prompt_tokens']} cosine={sim_1k:.6f}")
+          assert res_1k["usage"]["prompt_tokens"] > 2000
+          assert sim_1k < 0.999, f"Expected tail >512 tokens to change vector, got cosine={sim_1k}"
+
+          shared_3k = " ".join(f"section {i} distributed graph telemetry pipeline index" for i in range(450))
+          res_3k, _ = embed({"input": [shared_3k + tail_a, shared_3k + tail_b]})
+          assert "truncated" not in res_3k["data"][0], res_3k["data"][0]
+          sim_3k = cosine(res_3k["data"][0]["embedding"], res_3k["data"][1]["embedding"])
+          print(f"~3.5k-token tail change: prompt_tokens={res_3k['usage']['prompt_tokens']} cosine={sim_3k:.6f}")
+          assert res_3k["usage"]["prompt_tokens"] > 5000
+          assert sim_3k < 0.9999, f"Expected tail >2048 tokens to change vector, got cosine={sim_3k}"
+          PY
+
+          docker rm -f semembed-long
+
+          # 4. Verify SEMEMBED_MAX_TOKENS lowers the model window
+          docker run -d \
+            --name semembed-capped \
+            -p 8083:8081 \
+            -e SEMEMBED_MODEL=Snowflake/snowflake-arctic-embed-m-long \
+            -e SEMEMBED_MAX_TOKENS=1024 \
+            -e SEMEMBED_PORT=8081 \
+            -v /tmp/fastembed-cache:/home/semembed/.cache/fastembed \
+            semembed:test
+
+          for i in {1..30}; do
+            if curl -sf http://localhost:8083/health >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl -sf http://localhost:8083/health | grep -q '"max_tokens":1024' || (docker logs semembed-capped && exit 1)
+          curl -sf http://localhost:8083/models | grep -q '"native_max_tokens":8192' || exit 1
+
+          python3 - <<'PY'
+          import json, urllib.request
+          text_1500 = " ".join(f"chunk_{i} alpha beta gamma delta" for i in range(260))
+          req = urllib.request.Request(
+              "http://localhost:8083/v1/embeddings",
+              data=json.dumps({"input": text_1500}).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          with urllib.request.urlopen(req) as resp:
+              body = json.loads(resp.read())
+          assert body["data"][0].get("truncated") is True, body["data"][0]
+          assert body["usage"]["prompt_tokens"] == 1024, body["usage"]
+          print("SEMEMBED_MAX_TOKENS=1024 check passed:", body["usage"])
+          PY
+
+          docker rm -f semembed-capped
+
+      - name: Cleanup long-window containers
+        if: always()
+        run: docker rm -f semembed-long semembed-capped 2>/dev/null || true
 
       # Move cache
       - name: Move cache

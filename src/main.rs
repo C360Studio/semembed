@@ -1,3 +1,4 @@
+use anyhow::Context;
 use axum::{
     extract::State,
     http::StatusCode,
@@ -6,21 +7,179 @@ use axum::{
     Json, Router,
 };
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
-use prometheus::{Encoder, TextEncoder, Counter, Histogram, Registry, HistogramOpts, Opts};
+use prometheus::{Counter, Encoder, Histogram, HistogramOpts, Opts, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::{
+    borrow::Cow,
+    ops::Not,
+    sync::{Arc, Mutex},
+};
 use tokio::net::TcpListener;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing::{info, error, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+const TOKENIZE_CHUNK_SIZE: usize = 256;
+const ARCTIC_BGE_QUERY_PREFIX: &str =
+    "Represent this sentence for searching relevant passages: ";
+const SEARCH_QUERY_PREFIX: &str = "search_query: ";
+const SEARCH_DOCUMENT_PREFIX: &str = "search_document: ";
+const GEMMA_QUERY_PREFIX: &str = "task: search result | query: ";
+const GEMMA_DOCUMENT_PREFIX: &str = "title: none | text: ";
+
+#[derive(Clone)]
+struct ModelSpec {
+    model: EmbeddingModel,
+    native_max_tokens: usize,
+    query_prefix: Option<&'static str>,
+    document_prefix: Option<&'static str>,
+}
+
+fn resolve_model(requested: &str) -> (String, ModelSpec) {
+    let spec = match requested {
+        "Snowflake/snowflake-arctic-embed-s" => ModelSpec {
+            model: EmbeddingModel::SnowflakeArcticEmbedS,
+            native_max_tokens: 512,
+            query_prefix: Some(ARCTIC_BGE_QUERY_PREFIX),
+            document_prefix: None,
+        },
+        "Snowflake/snowflake-arctic-embed-xs" => ModelSpec {
+            model: EmbeddingModel::SnowflakeArcticEmbedXS,
+            native_max_tokens: 512,
+            query_prefix: Some(ARCTIC_BGE_QUERY_PREFIX),
+            document_prefix: None,
+        },
+        "Snowflake/snowflake-arctic-embed-m" => ModelSpec {
+            model: EmbeddingModel::SnowflakeArcticEmbedM,
+            native_max_tokens: 512,
+            query_prefix: Some(ARCTIC_BGE_QUERY_PREFIX),
+            document_prefix: None,
+        },
+        "Snowflake/snowflake-arctic-embed-m-long" => ModelSpec {
+            model: EmbeddingModel::SnowflakeArcticEmbedMLong,
+            native_max_tokens: 8192,
+            query_prefix: Some(ARCTIC_BGE_QUERY_PREFIX),
+            document_prefix: None,
+        },
+        "nomic-ai/nomic-embed-text-v1.5" => ModelSpec {
+            model: EmbeddingModel::NomicEmbedTextV15,
+            native_max_tokens: 8192,
+            query_prefix: Some(SEARCH_QUERY_PREFIX),
+            document_prefix: Some(SEARCH_DOCUMENT_PREFIX),
+        },
+        "google/embeddinggemma-300m" | "onnx-community/embeddinggemma-300m-ONNX" => ModelSpec {
+            model: EmbeddingModel::EmbeddingGemma300M,
+            native_max_tokens: 2048,
+            query_prefix: Some(GEMMA_QUERY_PREFIX),
+            document_prefix: Some(GEMMA_DOCUMENT_PREFIX),
+        },
+        "google/embeddinggemma-300m-q" => ModelSpec {
+            model: EmbeddingModel::EmbeddingGemma300MQ,
+            native_max_tokens: 2048,
+            query_prefix: Some(GEMMA_QUERY_PREFIX),
+            document_prefix: Some(GEMMA_DOCUMENT_PREFIX),
+        },
+        "google/embeddinggemma-300m-q4" => ModelSpec {
+            model: EmbeddingModel::EmbeddingGemma300MQ4,
+            native_max_tokens: 2048,
+            query_prefix: Some(GEMMA_QUERY_PREFIX),
+            document_prefix: Some(GEMMA_DOCUMENT_PREFIX),
+        },
+        "lightonai/modernbert-embed-large" => ModelSpec {
+            model: EmbeddingModel::ModernBertEmbedLarge,
+            native_max_tokens: 8192,
+            query_prefix: Some(SEARCH_QUERY_PREFIX),
+            document_prefix: Some(SEARCH_DOCUMENT_PREFIX),
+        },
+        "BAAI/bge-small-en-v1.5" => ModelSpec {
+            model: EmbeddingModel::BGESmallENV15,
+            native_max_tokens: 512,
+            query_prefix: Some(ARCTIC_BGE_QUERY_PREFIX),
+            document_prefix: None,
+        },
+        "BAAI/bge-base-en-v1.5" => ModelSpec {
+            model: EmbeddingModel::BGEBaseENV15,
+            native_max_tokens: 512,
+            query_prefix: Some(ARCTIC_BGE_QUERY_PREFIX),
+            document_prefix: None,
+        },
+        "sentence-transformers/all-MiniLM-L6-v2" => ModelSpec {
+            model: EmbeddingModel::AllMiniLML6V2,
+            native_max_tokens: 256,
+            query_prefix: None,
+            document_prefix: None,
+        },
+        _ => {
+            warn!(
+                "Unknown model {}, defaulting to Snowflake/snowflake-arctic-embed-s",
+                requested
+            );
+            return (
+                "Snowflake/snowflake-arctic-embed-s".to_string(),
+                ModelSpec {
+                    model: EmbeddingModel::SnowflakeArcticEmbedS,
+                    native_max_tokens: 512,
+                    query_prefix: Some(ARCTIC_BGE_QUERY_PREFIX),
+                    document_prefix: None,
+                },
+            );
+        }
+    };
+
+    (requested.to_string(), spec)
+}
+
+fn resolve_max_tokens(model_name: &str, native_max_tokens: usize) -> anyhow::Result<usize> {
+    match std::env::var("SEMEMBED_MAX_TOKENS") {
+        Ok(raw) if !raw.trim().is_empty() => {
+            let configured: usize = raw
+                .trim()
+                .parse()
+                .with_context(|| format!("Invalid SEMEMBED_MAX_TOKENS value: {raw:?}"))?;
+            anyhow::ensure!(configured > 0, "SEMEMBED_MAX_TOKENS must be greater than 0");
+            if configured > native_max_tokens {
+                warn!(
+                    "SEMEMBED_MAX_TOKENS={} exceeds {} native window ({}); clamping to {}",
+                    configured, model_name, native_max_tokens, native_max_tokens
+                );
+                Ok(native_max_tokens)
+            } else {
+                Ok(configured)
+            }
+        }
+        _ => Ok(native_max_tokens),
+    }
+}
+
+fn has_known_prefix(text: &str, spec: &ModelSpec) -> bool {
+    if spec.query_prefix.is_some_and(|p| text.starts_with(p))
+        || spec.document_prefix.is_some_and(|p| text.starts_with(p))
+    {
+        return true;
+    }
+    // EmbeddingGemma's prompt format carries a variable field: callers may send their own
+    // task ("task: question answering | query: ...") or a real title
+    // ("title: Installation | text: ..."). Those are already prepared and must not be wrapped.
+    spec.document_prefix == Some(GEMMA_DOCUMENT_PREFIX) && is_gemma_prepared(text)
+}
+
+fn is_gemma_prepared(text: &str) -> bool {
+    let first_line = text.lines().next().unwrap_or_default();
+    (text.starts_with("task: ") && first_line.contains(" | query: "))
+        || (text.starts_with("title: ") && first_line.contains(" | text: "))
+}
 
 // OpenAI-compatible request/response types
 #[derive(Debug, Deserialize)]
 struct EmbeddingRequest {
     input: InputType,
+    #[allow(dead_code)]
     model: Option<String>,
+    #[allow(dead_code)]
     #[serde(default)]
     encoding_format: EncodingFormat,
+    #[serde(default)]
+    input_type: Option<InputKind>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,12 +197,21 @@ enum EncodingFormat {
     Base64,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum InputKind {
+    Query,
+    #[default]
+    Document,
+}
+
 #[derive(Debug, Serialize)]
 struct EmbeddingResponse {
     object: String,
     data: Vec<EmbeddingObject>,
     model: String,
     usage: Usage,
+    prefix_applied: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,6 +219,8 @@ struct EmbeddingObject {
     object: String,
     embedding: Vec<f32>,
     index: usize,
+    #[serde(skip_serializing_if = "Not::not")]
+    truncated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,17 +245,30 @@ struct ErrorDetail {
 struct HealthResponse {
     status: String,
     model: String,
+    max_tokens: usize,
 }
 
 #[derive(Debug, Serialize)]
 struct ModelsResponse {
     models: Vec<String>,
+    details: Vec<ModelDetail>,
+}
+
+#[derive(Debug, Serialize)]
+struct ModelDetail {
+    id: String,
+    max_tokens: usize,
+    native_max_tokens: usize,
+    query_prefix: Option<&'static str>,
+    document_prefix: Option<&'static str>,
 }
 
 // Application state
 struct AppState {
     embedder: Mutex<TextEmbedding>,
     model_name: String,
+    spec: ModelSpec,
+    max_tokens: usize,
     metrics: Arc<Metrics>,
 }
 
@@ -95,6 +278,7 @@ struct Metrics {
     requests_total: Counter,
     request_duration: Histogram,
     tokens_processed: Counter,
+    inputs_truncated: Counter,
     errors_total: Counter,
 }
 
@@ -104,25 +288,31 @@ impl Metrics {
 
         let requests_total = Counter::with_opts(Opts::new(
             "semembed_requests_total",
-            "Total number of embedding requests"
+            "Total number of embedding requests",
         ))?;
         registry.register(Box::new(requests_total.clone()))?;
 
         let request_duration = Histogram::with_opts(HistogramOpts::new(
             "semembed_request_duration_seconds",
-            "Request duration in seconds"
+            "Request duration in seconds",
         ))?;
         registry.register(Box::new(request_duration.clone()))?;
 
         let tokens_processed = Counter::with_opts(Opts::new(
             "semembed_tokens_processed_total",
-            "Total number of tokens processed"
+            "Total number of model tokens processed",
         ))?;
         registry.register(Box::new(tokens_processed.clone()))?;
 
+        let inputs_truncated = Counter::with_opts(Opts::new(
+            "semembed_inputs_truncated_total",
+            "Total number of input texts truncated to the model context window",
+        ))?;
+        registry.register(Box::new(inputs_truncated.clone()))?;
+
         let errors_total = Counter::with_opts(Opts::new(
             "semembed_errors_total",
-            "Total number of errors"
+            "Total number of errors",
         ))?;
         registry.register(Box::new(errors_total.clone()))?;
 
@@ -131,6 +321,7 @@ impl Metrics {
             requests_total,
             request_duration,
             tokens_processed,
+            inputs_truncated,
             errors_total,
         })
     }
@@ -150,42 +341,63 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting semembed service");
 
     // Get configuration from environment
-    let model_name = std::env::var("SEMEMBED_MODEL")
+    let requested_model = std::env::var("SEMEMBED_MODEL")
         .unwrap_or_else(|_| "Snowflake/snowflake-arctic-embed-s".to_string());
     let port = std::env::var("SEMEMBED_PORT")
         .unwrap_or_else(|_| "8081".to_string())
-        .parse::<u16>()?;
+        .parse::<u16>()
+        .context("Invalid SEMEMBED_PORT value")?;
 
-    info!("Loading embedding model: {}", model_name);
+    let (model_name, spec) = resolve_model(&requested_model);
+    let requested_max_tokens = resolve_max_tokens(&model_name, spec.native_max_tokens)?;
 
-    // Initialize fastembed model
-    let model = match model_name.as_str() {
-        "Snowflake/snowflake-arctic-embed-s" => EmbeddingModel::SnowflakeArcticEmbedS,
-        "Snowflake/snowflake-arctic-embed-xs" => EmbeddingModel::SnowflakeArcticEmbedXS,
-        "Snowflake/snowflake-arctic-embed-m" => EmbeddingModel::SnowflakeArcticEmbedM,
-        "Snowflake/snowflake-arctic-embed-m-long" => EmbeddingModel::SnowflakeArcticEmbedMLong,
-        "nomic-ai/nomic-embed-text-v1.5" => EmbeddingModel::NomicEmbedTextV15,
-        "google/embeddinggemma-300m" | "onnx-community/embeddinggemma-300m-ONNX" => {
-            EmbeddingModel::EmbeddingGemma300M
-        }
-        "google/embeddinggemma-300m-q" => EmbeddingModel::EmbeddingGemma300MQ,
-        "google/embeddinggemma-300m-q4" => EmbeddingModel::EmbeddingGemma300MQ4,
-        "lightonai/modernbert-embed-large" => EmbeddingModel::ModernBertEmbedLarge,
-        "BAAI/bge-small-en-v1.5" => EmbeddingModel::BGESmallENV15,
-        "BAAI/bge-base-en-v1.5" => EmbeddingModel::BGEBaseENV15,
-        "sentence-transformers/all-MiniLM-L6-v2" => EmbeddingModel::AllMiniLML6V2,
-        _ => {
-            warn!("Unknown model {}, defaulting to SnowflakeArcticEmbedS", model_name);
-            EmbeddingModel::SnowflakeArcticEmbedS
-        }
-    };
+    info!(
+        model = %model_name,
+        max_tokens = requested_max_tokens,
+        native_max_tokens = spec.native_max_tokens,
+        "Loading embedding model"
+    );
 
-    // fastembed v7 API - TextInitOptions builder pattern
+    // fastembed v7 API - TextInitOptions builder pattern with explicit model context limit
     let embedder = TextEmbedding::try_new(
-        TextInitOptions::new(model).with_show_download_progress(true)
+        TextInitOptions::new(spec.model.clone())
+            .with_max_length(requested_max_tokens)
+            .with_show_download_progress(true),
     )?;
 
-    info!("Model loaded successfully");
+    let active_max_tokens = embedder
+        .tokenizer
+        .get_truncation()
+        .map(|t| t.max_length)
+        .unwrap_or(requested_max_tokens);
+
+    // The tokenizer never cuts special tokens: a window that cannot hold them plus one content
+    // token would silently drop text without reporting truncation, so refuse it at startup.
+    let special_tokens: usize = embedder
+        .tokenizer
+        .encode("", true)
+        .map_err(|e| anyhow::anyhow!("Failed to probe tokenizer special tokens: {e}"))?
+        .get_attention_mask()
+        .iter()
+        .map(|&m| m as usize)
+        .sum();
+    anyhow::ensure!(
+        active_max_tokens > special_tokens,
+        "SEMEMBED_MAX_TOKENS={} is too small for {}: the model adds {} special tokens, so the minimum is {}",
+        active_max_tokens,
+        model_name,
+        special_tokens,
+        special_tokens + 1
+    );
+
+    info!(
+        model = %model_name,
+        max_tokens = active_max_tokens,
+        native_max_tokens = spec.native_max_tokens,
+        has_query_prefix = spec.query_prefix.is_some(),
+        has_document_prefix = spec.document_prefix.is_some(),
+        "Model loaded successfully"
+    );
 
     // Initialize metrics
     let metrics = Arc::new(Metrics::new()?);
@@ -193,8 +405,10 @@ async fn main() -> anyhow::Result<()> {
     // Create shared state
     let state = Arc::new(AppState {
         embedder: Mutex::new(embedder),
-        model_name: model_name.clone(),
-        metrics: metrics.clone(),
+        model_name,
+        spec,
+        max_tokens: active_max_tokens,
+        metrics,
     });
 
     // Build router
@@ -243,15 +457,58 @@ async fn create_embeddings(
         ));
     }
 
-    // Count tokens (approximate - count words for now)
-    let token_count: usize = texts.iter().map(|t| t.split_whitespace().count()).sum();
-    state.metrics.tokens_processed.inc_by(token_count as f64);
+    // Apply model-specific prefix based on input_type (defaults to document)
+    let input_kind = req.input_type.unwrap_or_default();
+    let target_prefix = match input_kind {
+        InputKind::Query => state.spec.query_prefix,
+        InputKind::Document => state.spec.document_prefix,
+    };
 
-    // Generate embeddings (lock the mutex for mutable access)
-    let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-    let embeddings = {
+    let mut prefix_applied = false;
+    let prepared_texts: Vec<Cow<'_, str>> = texts
+        .iter()
+        .map(|text| match target_prefix {
+            Some(prefix) if !has_known_prefix(text, &state.spec) => {
+                prefix_applied = true;
+                Cow::Owned(format!("{prefix}{text}"))
+            }
+            _ => Cow::Borrowed(text.as_str()),
+        })
+        .collect();
+
+    let text_refs: Vec<&str> = prepared_texts.iter().map(Cow::as_ref).collect();
+
+    // Tokenize for exact token counts + truncation detection, then run ONNX inference
+    let (embeddings, item_stats) = {
         let mut embedder = state.embedder.lock().unwrap();
-        match embedder.embed(text_refs, None) {
+
+        let mut stats = Vec::with_capacity(text_refs.len());
+        for chunk in text_refs.chunks(TOKENIZE_CHUNK_SIZE) {
+            let encodings = match embedder.tokenizer.encode_batch(chunk.to_vec(), true) {
+                Ok(enc) => enc,
+                Err(e) => {
+                    error!("Failed to tokenize inputs: {}", e);
+                    state.metrics.errors_total.inc();
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: ErrorDetail {
+                                message: format!("Failed to tokenize inputs: {}", e),
+                                error_type: "internal_error".to_string(),
+                            },
+                        }),
+                    ));
+                }
+            };
+
+            for enc in encodings {
+                let token_len: usize = enc.get_attention_mask().iter().map(|&m| m as usize).sum();
+                let was_truncated = !enc.get_overflowing().is_empty();
+                stats.push((token_len, was_truncated));
+            }
+        }
+
+        let emb = match embedder.embed(text_refs, None) {
             Ok(emb) => emb,
             Err(e) => {
                 error!("Failed to generate embeddings: {}", e);
@@ -266,17 +523,29 @@ async fn create_embeddings(
                     }),
                 ));
             }
-        }
+        };
+
+        (emb, stats)
     };
+
+    let prompt_tokens: usize = item_stats.iter().map(|(tokens, _)| *tokens).sum();
+    let truncated_count = item_stats.iter().filter(|(_, truncated)| *truncated).count();
+
+    state.metrics.tokens_processed.inc_by(prompt_tokens as f64);
+    if truncated_count > 0 {
+        state.metrics.inputs_truncated.inc_by(truncated_count as f64);
+    }
 
     // Build response
     let data: Vec<EmbeddingObject> = embeddings
         .into_iter()
+        .zip(item_stats)
         .enumerate()
-        .map(|(index, embedding)| EmbeddingObject {
+        .map(|(index, (embedding, (_, truncated)))| EmbeddingObject {
             object: "embedding".to_string(),
             embedding,
             index,
+            truncated,
         })
         .collect();
 
@@ -285,9 +554,10 @@ async fn create_embeddings(
         data,
         model: state.model_name.clone(),
         usage: Usage {
-            prompt_tokens: token_count,
-            total_tokens: token_count,
+            prompt_tokens,
+            total_tokens: prompt_tokens,
         },
+        prefix_applied,
     };
 
     timer.observe_duration();
@@ -298,12 +568,20 @@ async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(HealthResponse {
         status: "healthy".to_string(),
         model: state.model_name.clone(),
+        max_tokens: state.max_tokens,
     })
 }
 
 async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(ModelsResponse {
         models: vec![state.model_name.clone()],
+        details: vec![ModelDetail {
+            id: state.model_name.clone(),
+            max_tokens: state.max_tokens,
+            native_max_tokens: state.spec.native_max_tokens,
+            query_prefix: state.spec.query_prefix,
+            document_prefix: state.spec.document_prefix,
+        }],
     })
 }
 
@@ -329,5 +607,40 @@ async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
                 "Failed to convert metrics".to_string(),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gemma_inputs_already_in_prompt_format_are_not_wrapped() {
+        let (_, gemma) = resolve_model("google/embeddinggemma-300m");
+        for prepared in [
+            "title: none | text: Restart the worker",
+            "title: Installation | text: Restart the worker",
+            "task: search result | query: how do I restart the worker",
+            "task: question answering | query: how do I restart the worker",
+        ] {
+            assert!(has_known_prefix(prepared, &gemma), "{prepared:?} should count as prepared");
+        }
+        for plain in [
+            "Restart the worker",
+            "title: a heading in prose\nwith | text: on a later line",
+            "the title: Installation | text: inline",
+        ] {
+            assert!(!has_known_prefix(plain, &gemma), "{plain:?} should get a prefix");
+        }
+    }
+
+    #[test]
+    fn gemma_format_is_not_recognized_for_other_models() {
+        let (_, arctic) = resolve_model("Snowflake/snowflake-arctic-embed-s");
+        assert!(!has_known_prefix("title: Installation | text: Restart", &arctic));
+        assert!(has_known_prefix(
+            "Represent this sentence for searching relevant passages: restart",
+            &arctic
+        ));
     }
 }

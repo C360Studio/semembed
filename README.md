@@ -81,7 +81,8 @@ OpenAI-compatible embedding generation endpoint.
 {
   "input": "Text to embed",
   "model": "Snowflake/snowflake-arctic-embed-s",
-  "encoding_format": "float"
+  "encoding_format": "float",
+  "input_type": "document"
 }
 ```
 
@@ -89,6 +90,32 @@ OpenAI-compatible embedding generation endpoint.
 
 - Single string: `"input": "text"`
 - Array of strings: `"input": ["text1", "text2"]`
+
+**`input_type`** (optional): `"query"` or `"document"`, default `"document"`.
+semembed adds the served model's own prefix so clients don't have to know it:
+
+| Model family | `query` prefix | `document` prefix |
+|--------------|----------------|-------------------|
+| `Snowflake/snowflake-arctic-embed-*`, `BAAI/bge-*-en-v1.5` | `Represent this sentence for searching relevant passages: ` | none |
+| `nomic-ai/nomic-embed-text-v1.5`, `lightonai/modernbert-embed-large` | `search_query: ` | `search_document: ` |
+| `google/embeddinggemma-300m*` | `task: search result \| query: ` | `title: none \| text: ` |
+| `sentence-transformers/all-MiniLM-L6-v2` | none | none |
+
+A text that already starts with one of the model's known prefixes is sent
+unchanged, so clients that still add their own prefix are not
+double-prefixed. For EmbeddingGemma, any input already in its prompt
+format counts, including a custom task (`task: question answering | query: ...`)
+or a real title (`title: Installation | text: ...`). `GET /models` lists the
+prefixes in use.
+
+> For the nomic, ModernBERT and EmbeddingGemma models, a request without
+> `input_type` now gets the document prefix. Requests to the default model
+> without `input_type` are unchanged.
+
+**Context window**: each text is cut to the served model's context window
+(see `max_tokens` in `GET /health`), or to `SEMEMBED_MAX_TOKENS` if that is
+lower. A text that was cut comes back with `"truncated": true` on its `data`
+entry and is counted in `semembed_inputs_truncated_total`.
 
 **Response**:
 
@@ -106,9 +133,18 @@ OpenAI-compatible embedding generation endpoint.
   "usage": {
     "prompt_tokens": 5,
     "total_tokens": 5
-  }
+  },
+  "prefix_applied": false
 }
 ```
+
+- `truncated: true` appears only on entries that were cut; it is omitted
+  otherwise. Clients that follow the OpenAI shape ignore it.
+- `usage.prompt_tokens` is the real model token count from the model's
+  tokenizer, including special tokens and any added prefix, capped at the
+  context window for cut texts.
+- `prefix_applied` is `true` when semembed added a prefix to at least one
+  input.
 
 ### GET /health
 
@@ -119,7 +155,8 @@ Health check endpoint for container orchestration.
 ```json
 {
   "status": "healthy",
-  "model": "Snowflake/snowflake-arctic-embed-s"
+  "model": "Snowflake/snowflake-arctic-embed-s",
+  "max_tokens": 512
 }
 ```
 
@@ -131,7 +168,16 @@ List loaded models endpoint.
 
 ```json
 {
-  "models": ["Snowflake/snowflake-arctic-embed-s"]
+  "models": ["Snowflake/snowflake-arctic-embed-s"],
+  "details": [
+    {
+      "id": "Snowflake/snowflake-arctic-embed-s",
+      "max_tokens": 512,
+      "native_max_tokens": 512,
+      "query_prefix": "Represent this sentence for searching relevant passages: ",
+      "document_prefix": null
+    }
+  ]
 }
 ```
 
@@ -143,7 +189,8 @@ Prometheus metrics endpoint.
 
 - `semembed_requests_total` - Total embedding requests
 - `semembed_request_duration_seconds` - Request latency histogram
-- `semembed_tokens_processed_total` - Total tokens processed
+- `semembed_tokens_processed_total` - Total model tokens processed
+- `semembed_inputs_truncated_total` - Input texts cut to the context window
 - `semembed_errors_total` - Total errors
 
 ## Configuration
@@ -153,6 +200,7 @@ Environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SEMEMBED_MODEL` | `Snowflake/snowflake-arctic-embed-s` | Model to use (see supported models) |
+| `SEMEMBED_MAX_TOKENS` | model's own window | Lower the context window to bound memory and latency (clamped to the model's window if set higher; startup fails below the model's special-token count + 1, e.g. 3 for the BERT-style models) |
 | `SEMEMBED_PORT` | `8081` | HTTP server port |
 | `RUST_LOG` | `info` | Log level (error, warn, info, debug, trace) |
 
@@ -163,6 +211,9 @@ default (`Snowflake/snowflake-arctic-embed-s`) is the strongest option in
 the small/fast tier per the MTEB Retrieval leaderboard (NDCG@10 51.98 vs
 51.68 for `bge-small-en-v1.5`); same 33M params, same 384-dim, same 512
 token context, Apache-2.0.
+
+The Context column is the token window semembed applies (it is passed to
+fastembed explicitly; fastembed's own default would cut every model at 512).
 
 | Model | Dimensions | Params | Context | Best For |
 |-------|------------|--------|---------|----------|
@@ -177,7 +228,7 @@ token context, Apache-2.0.
 | `lightonai/modernbert-embed-large` | 1024 | 395M | 8192 | High overall MTEB (63.84) with 8K context |
 | `BAAI/bge-small-en-v1.5` | 384 | 33M | 512 | Prior default, kept for compat |
 | `BAAI/bge-base-en-v1.5` | 768 | 109M | 512 | Prior higher-quality option |
-| `sentence-transformers/all-MiniLM-L6-v2` | 384 | 22M | 512 | Baseline; outperformed by arctic-xs |
+| `sentence-transformers/all-MiniLM-L6-v2` | 384 | 22M | 256 | Baseline; outperformed by arctic-xs |
 
 > **Vector compatibility**: switching models produces incompatible
 > embedding spaces. Vectors from one model cannot be compared with
@@ -191,6 +242,35 @@ docker run -p 8081:8081 \
   -e SEMEMBED_MODEL=Snowflake/snowflake-arctic-embed-m \
   semstreams-semembed:latest
 ```
+
+### Long context: memory and latency
+
+A long window costs memory that grows faster than the token count
+(attention is quadratic in sequence length), and ONNX Runtime keeps the
+peak allocation after the request ends. One 8,192-token text needs far more
+than the 512 MB to 1 GB a small container is usually given, so set
+`SEMEMBED_MAX_TOKENS` for long-window models when memory is tight.
+
+Measured with `Snowflake/snowflake-arctic-embed-m-long`: one fresh
+container per window, so each peak is from that row's request alone. Docker
+Desktop on an Apple-silicon Mac (arm64, 12 CPUs); x86 numbers will differ.
+Reproduce with `task bench:context`.
+
+| `max_tokens` | Inputs per request | Latency | Peak RSS |
+|-------------:|-------------------:|--------:|---------:|
+| (idle, model loaded) | – | – | 654 MiB |
+| 512 | 1 | 0.3 s | 659 MiB |
+| 512 | 4 | 1.0 s | 806 MiB |
+| 1,024 | 1 | 0.6 s | 782 MiB |
+| 1,024 | 4 | 2.4 s | 1,271 MiB |
+| 2,048 | 1 | 1.4 s | 1,130 MiB |
+| 2,048 | 4 | 6.3 s | 2,751 MiB |
+| 4,096 | 1 | 4.0 s | 2,441 MiB |
+| 8,192 | 1 | 10.7 s | 7,433 MiB |
+
+Peaks add up across requests of different shapes: one container that
+served a mix of 1,700- to 8,192-token requests reached 18.8 GiB. Batches of
+8,192-token inputs were not measured.
 
 ## Architecture
 

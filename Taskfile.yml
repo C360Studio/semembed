@@ -15,21 +15,21 @@ tasks:
     cmds:
       - echo "🔨 Building semembed Docker image..."
       - docker build -t {{.IMAGE_NAME}}:latest .
-      - echo "✅ Image built: {{.IMAGE_NAME}}:latest"
+      - 'echo "✅ Image built: {{.IMAGE_NAME}}:latest"'
 
   build:fast:
     desc: Build Docker image with buildkit cache
     cmds:
       - echo "🔨 Building semembed with BuildKit cache..."
       - DOCKER_BUILDKIT=1 docker build --cache-from {{.IMAGE_NAME}}:latest -t {{.IMAGE_NAME}}:latest .
-      - echo "✅ Image built: {{.IMAGE_NAME}}:latest"
+      - 'echo "✅ Image built: {{.IMAGE_NAME}}:latest"'
 
   build:no-cache:
     desc: Build Docker image without cache
     cmds:
       - echo "🔨 Building semembed without cache..."
       - docker build --no-cache -t {{.IMAGE_NAME}}:latest .
-      - echo "✅ Image built: {{.IMAGE_NAME}}:latest"
+      - 'echo "✅ Image built: {{.IMAGE_NAME}}:latest"'
 
   # Run tasks
   run:
@@ -47,8 +47,8 @@ tasks:
           -v semembed-cache:/home/semembed/.cache/fastembed \
           {{.IMAGE_NAME}}:latest
       - echo "✅ Service running at http://localhost:{{.PORT}}"
-      - echo "📊 Health: curl http://localhost:{{.PORT}}/health"
-      - echo "📝 Logs: task logs"
+      - 'echo "📊 Health: curl http://localhost:{{.PORT}}/health"'
+      - 'echo "📝 Logs: task logs"'
 
   run:fg:
     desc: Run semembed in foreground (see logs)
@@ -157,9 +157,74 @@ tasks:
       - echo ""
       - echo "✅ Models endpoint test passed"
 
+  test:query:
+    desc: Test query prefix handling (input_type=query)
+    cmds:
+      - echo "🧪 Testing query prefix..."
+      - |
+        response=$(curl -sf -X POST http://localhost:{{.PORT}}/v1/embeddings \
+          -H "Content-Type: application/json" \
+          -d '{
+            "input": "how do I restart the ingest worker",
+            "input_type": "query"
+          }')
+        echo "$response" | grep -q '"prefix_applied":true' || (echo "❌ Expected prefix_applied:true" && exit 1)
+      - echo "✅ Query prefix test passed"
+
+  test:truncation:
+    desc: Test truncation reporting and metrics
+    cmds:
+      - echo "🧪 Testing truncation detection..."
+      - |
+        long_text=$(python3 -c 'print(" ".join(f"section_{i} alpha beta gamma delta" for i in range(200)))')
+        response=$(curl -sf -X POST http://localhost:{{.PORT}}/v1/embeddings \
+          -H "Content-Type: application/json" \
+          -d "{\"input\": [\"short text\", \"$long_text\"]}")
+        echo "$response" | grep -q '"truncated":true' || (echo "❌ Expected truncated:true on long input" && exit 1)
+        curl -sf http://localhost:{{.PORT}}/metrics | grep -q 'semembed_inputs_truncated_total' || (echo "❌ Missing truncation metric" && exit 1)
+      - echo "✅ Truncation test passed"
+
+  bench:context:
+    desc: Measure peak memory and latency per context window (fresh container per window)
+    deps: [build]
+    vars:
+      BENCH_MODEL: '{{.BENCH_MODEL | default "Snowflake/snowflake-arctic-embed-m-long"}}'
+      BENCH_PORT: 8089
+    cmds:
+      - |
+        for cap in 512 1024 2048 4096 8192; do
+          docker rm -f semembed-bench >/dev/null 2>&1 || true
+          docker run -d --name semembed-bench -p {{.BENCH_PORT}}:8081 \
+            -e SEMEMBED_MODEL={{.BENCH_MODEL}} -e SEMEMBED_MAX_TOKENS=$cap \
+            -v semembed-cache:/home/semembed/.cache/fastembed \
+            {{.IMAGE_NAME}}:latest >/dev/null
+          for i in $(seq 1 200); do curl -sf http://localhost:{{.BENCH_PORT}}/health >/dev/null && break; sleep 3; done
+          python3 - "$cap" <<'PY'
+        import json, subprocess, sys, time, urllib.request
+        cap = int(sys.argv[1])
+        def mem():
+            out = subprocess.check_output(["docker", "exec", "semembed-bench", "grep", "-E", "VmRSS|VmHWM", "/proc/1/status"], text=True)
+            return {l.split(":")[0]: int(l.split()[1]) // 1024 for l in out.strip().splitlines()}
+        def embed(inputs):
+            t = time.perf_counter()
+            req = urllib.request.Request("http://localhost:{{.BENCH_PORT}}/v1/embeddings",
+                data=json.dumps({"input": inputs}).encode(), headers={"Content-Type": "application/json"})
+            body = json.loads(urllib.request.urlopen(req, timeout=600).read())
+            return body, time.perf_counter() - t
+        idle = mem()["VmHWM"]
+        text = lambda s: " ".join(f"tok{s}_{i} alpha beta gamma delta epsilon" for i in range(1300))
+        for bs in ([1, 4] if cap <= 2048 else [1]):
+            body, dt = embed([text(i) for i in range(bs)])
+            m = mem()
+            print(f"max_tokens={cap} batch={bs} tokens/input={body['usage']['prompt_tokens'] // bs} "
+                  f"latency_s={dt:.2f} idle_MiB={idle} peak_MiB={m['VmHWM']}", flush=True)
+        PY
+        done
+        docker rm -f semembed-bench >/dev/null
+
   test:all:
     desc: Run all tests
-    deps: [test:health, test:embed, test:batch, test:models]
+    deps: [test:health, test:embed, test:batch, test:models, test:query, test:truncation]
     cmds:
       - echo "✅ All tests passed"
 

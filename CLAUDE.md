@@ -65,12 +65,19 @@ hand-rolling commands.
 The `/v1/embeddings` endpoint mimics OpenAI's embeddings API so callers
 can point an OpenAI SDK at this service unchanged. That means:
 
-- Request: `{ "input": string | string[], "model": string?, "encoding_format": "float" | "base64"? }`
-- Response shape: `{ object: "list", data: [{object, embedding, index}], model, usage: {prompt_tokens, total_tokens} }`
+- Request: `{ "input": string | string[], "model": string?, "encoding_format": "float" | "base64"?, "input_type": "query" | "document"? }`
+- Response shape: `{ object: "list", data: [{object, embedding, index, truncated?: true}], model, usage: {prompt_tokens, total_tokens}, prefix_applied: bool }`
 - Error shape: `{ error: { message, type } }`
 
-Token counts are an approximation (whitespace word count) — fine for
-billing-shaped telemetry, not exact. Don't claim it's a real tokenizer.
+`input_type` defaults to `"document"` when omitted or `null`, applying the
+served model's query or document prefix from `ModelSpec` in `src/main.rs`
+(without double-prefixing inputs that already carry a known prefix for that
+model). `truncated` is omitted when `false` and emitted as `true` only on
+entries cut to `max_tokens` (also counted in `semembed_inputs_truncated_total`).
+
+`usage.prompt_tokens` and `semembed_tokens_processed_total` report real
+model token counts from the active HuggingFace tokenizer (including special
+tokens and any applied prefix, capped at `max_tokens` when truncated).
 
 `encoding_format: "base64"` is accepted in the request schema but the
 response is always float arrays. Either implement base64 properly or
@@ -78,25 +85,28 @@ reject the value — don't silently ignore it long-term.
 
 ## Models
 
-The `SEMEMBED_MODEL` env var picks the model. Anything not matched in
-`src/main.rs` logs a warning and falls back to the default
-(`SnowflakeArcticEmbedS`). When adding a model, add the match arm *and*
-update the README's supported-models table.
+The `SEMEMBED_MODEL` env var picks the model, and optional
+`SEMEMBED_MAX_TOKENS` lowers the context window below the model's native
+limit (clamped if set higher). Anything not matched in `src/main.rs` logs a
+warning and falls back to the default (`SnowflakeArcticEmbedS`). When
+adding a model, add its `ModelSpec` arm (including `native_max_tokens`,
+`query_prefix`, and `document_prefix`) *and* update the README's
+supported-models table.
 
 **Currently mapped**:
 
-- `Snowflake/snowflake-arctic-embed-s` → `SnowflakeArcticEmbedS` *(default — 384d)*
-- `Snowflake/snowflake-arctic-embed-xs` → `SnowflakeArcticEmbedXS`
-- `Snowflake/snowflake-arctic-embed-m` → `SnowflakeArcticEmbedM`
-- `Snowflake/snowflake-arctic-embed-m-long` → `SnowflakeArcticEmbedMLong` (8K context, 768d)
-- `nomic-ai/nomic-embed-text-v1.5` → `NomicEmbedTextV15` (8K context, 768d MRL)
-- `google/embeddinggemma-300m` (`onnx-community/embeddinggemma-300m-ONNX`) → `EmbeddingGemma300M`
-- `google/embeddinggemma-300m-q` → `EmbeddingGemma300MQ`
-- `google/embeddinggemma-300m-q4` → `EmbeddingGemma300MQ4`
-- `lightonai/modernbert-embed-large` → `ModernBertEmbedLarge` (8K context, 1024d)
-- `BAAI/bge-small-en-v1.5` → `BGESmallENV15` (prior default, kept for compat)
-- `BAAI/bge-base-en-v1.5` → `BGEBaseENV15`
-- `sentence-transformers/all-MiniLM-L6-v2` → `AllMiniLML6V2`
+- `Snowflake/snowflake-arctic-embed-s` → `SnowflakeArcticEmbedS` *(default — 384d, 512 ctx)*
+- `Snowflake/snowflake-arctic-embed-xs` → `SnowflakeArcticEmbedXS` (384d, 512 ctx)
+- `Snowflake/snowflake-arctic-embed-m` → `SnowflakeArcticEmbedM` (768d, 512 ctx)
+- `Snowflake/snowflake-arctic-embed-m-long` → `SnowflakeArcticEmbedMLong` (768d, 8192 ctx)
+- `nomic-ai/nomic-embed-text-v1.5` → `NomicEmbedTextV15` (768d MRL, 8192 ctx)
+- `google/embeddinggemma-300m` (`onnx-community/embeddinggemma-300m-ONNX`) → `EmbeddingGemma300M` (768d MRL, 2048 ctx)
+- `google/embeddinggemma-300m-q` → `EmbeddingGemma300MQ` (768d MRL, 2048 ctx)
+- `google/embeddinggemma-300m-q4` → `EmbeddingGemma300MQ4` (768d MRL, 2048 ctx)
+- `lightonai/modernbert-embed-large` → `ModernBertEmbedLarge` (1024d, 8192 ctx)
+- `BAAI/bge-small-en-v1.5` → `BGESmallENV15` (384d, 512 ctx, prior default)
+- `BAAI/bge-base-en-v1.5` → `BGEBaseENV15` (768d, 512 ctx)
+- `sentence-transformers/all-MiniLM-L6-v2` → `AllMiniLML6V2` (384d, 256 ctx)
 
 ### Why the default is `snowflake-arctic-embed-s`
 
@@ -125,13 +135,14 @@ plan downstream.
 
 ## Dependency upgrades
 
-- Compatible bumps (caret-allowed): edit `Cargo.toml`, run a docker
-  build, ship.
+- `Cargo.lock` is committed and enforced via `--locked` in `Dockerfile`.
+- Compatible bumps (caret-allowed): edit `Cargo.toml`, regenerate
+  `Cargo.lock` inside `rust:1.95-slim-trixie`, run a docker build, ship.
 - Major bumps (axum, tower-http, prometheus, fastembed, thiserror-style
   crates): check the changelog for the specific APIs used in
   `src/main.rs` before bumping. The surface area is small — usually a
   10-minute audit.
-- Rust toolchain: bump in **both** `Dockerfile` (`FROM rust:X.Y-slim`)
+- Rust toolchain: bump in **both** `Dockerfile` (`FROM rust:X.Y-slim-trixie`)
   and `.github/workflows/ci.yml` (`RUST_VERSION`) together.
 
 ## What to skip
