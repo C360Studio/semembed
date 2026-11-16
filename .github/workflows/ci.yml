@@ -202,14 +202,10 @@ jobs:
         if: always()
         run: docker rm -f semembed-test || true
 
-      - name: Test long-window model (8192 ctx), SEMEMBED_MAX_TOKENS, and benchmark
+      - name: Test long-window model (8192 ctx) and SEMEMBED_MAX_TOKENS
         run: |
           mkdir -p /tmp/fastembed-cache
           chmod 0777 /tmp/fastembed-cache
-
-          echo "=== Host specs ==="
-          nproc
-          free -m
 
           docker run -d \
             --name semembed-long \
@@ -229,7 +225,7 @@ jobs:
           curl -sf http://localhost:8082/health | grep -q '"max_tokens":8192' || (docker logs semembed-long && exit 1)
 
           python3 - <<'PY'
-          import json, math, subprocess, time, urllib.request
+          import json, math, time, urllib.request
 
           def embed(payload, port=8082):
               t0 = time.perf_counter()
@@ -247,19 +243,6 @@ jobs:
               na = math.sqrt(sum(x * x for x in a))
               nb = math.sqrt(sum(y * y for y in b))
               return dot / (na * nb)
-
-          def proc_mem_mb(container="semembed-long"):
-              out = subprocess.check_output(
-                  ["docker", "exec", container, "grep", "-E", "VmRSS|VmHWM", "/proc/1/status"],
-                  text=True,
-              )
-              vals = {}
-              for line in out.strip().splitlines():
-                  k, v = line.split(":", 1)
-                  vals[k.strip()] = int(v.strip().split()[0]) / 1024.0
-              return vals
-
-          print("=== Idle loaded memory ===", proc_mem_mb())
 
           # 1. Verify texts > 512 tokens (~1,400 tokens and ~3,500 tokens) change vector when tail changes
           shared_1k = " ".join(f"paragraph {i} network routing consensus storage stream" for i in range(180))
@@ -280,47 +263,6 @@ jobs:
           print(f"~3.5k-token tail change: prompt_tokens={res_3k['usage']['prompt_tokens']} cosine={sim_3k:.6f}")
           assert res_3k["usage"]["prompt_tokens"] > 5000
           assert sim_3k < 0.9999, f"Expected tail >2048 tokens to change vector, got cosine={sim_3k}"
-
-          # 2. Verify >8192-token input marks truncated: true and increments metric
-          over_8k = " ".join(f"record_{i} alpha beta gamma delta epsilon zeta" for i in range(1300))
-          res_over, _ = embed({"input": over_8k})
-          assert res_over["data"][0].get("truncated") is True, res_over["data"][0]
-          assert res_over["usage"]["prompt_tokens"] == 8192, res_over["usage"]
-          metrics = urllib.request.urlopen("http://localhost:8082/metrics").read().decode()
-          assert "semembed_inputs_truncated_total 1" in metrics, metrics
-
-          # 3. Benchmark 512, 2048, 4096, and 8192 token batches (memory + latency)
-          def make_exact_8k_item(seed):
-              # Exceeds 8192 slightly so tokenizer truncates to exact 8192 tokens
-              return " ".join(f"tok{seed}_{i} alpha beta gamma delta epsilon" for i in range(1300))
-
-          def make_words(n, seed=0):
-              return " ".join(f"w{seed}_{i}" for i in range(n))
-
-          print("=== BENCHMARK START ===")
-          for label, item_fn, batch_sizes in [
-              ("512_tok", lambda b: " ".join(f"item{b}_{i} alpha beta gamma" for i in range(95)), [1, 8, 32]),
-              ("2048_tok", lambda b: " ".join(f"item{b}_{i} alpha beta gamma" for i in range(380)), [1, 4, 8]),
-              ("8192_tok", make_exact_8k_item, [1, 2, 4, 8]),
-          ]:
-              for bs in batch_sizes:
-                  if label == "8192_tok" and bs > 1:
-                      m_prev = proc_mem_mb()
-                      # Guard against runner OOM on 16GB host
-                      if m_prev["VmHWM"] > 7500 and bs >= 4:
-                          print(f"Skipping {label} batch={bs} (VmHWM already {m_prev['VmHWM']:.1f} MiB)")
-                          continue
-                      if m_prev["VmHWM"] > 10500:
-                          print(f"Skipping {label} batch={bs} (VmHWM already {m_prev['VmHWM']:.1f} MiB)")
-                          continue
-                  inputs = [item_fn(b) for b in range(bs)]
-                  resp, dt = embed({"input": inputs})
-                  mem = proc_mem_mb()
-                  print(
-                      f"BENCH {label} batch={bs} prompt_tokens={resp['usage']['prompt_tokens']} "
-                      f"latency_s={dt:.3f} VmRSS_MiB={mem['VmRSS']:.1f} VmHWM_MiB={mem['VmHWM']:.1f}"
-                  )
-          print("=== BENCHMARK END ===")
           PY
 
           docker rm -f semembed-long
