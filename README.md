@@ -103,7 +103,10 @@ semembed adds the served model's own prefix so clients don't have to know it:
 
 A text that already starts with one of the model's known prefixes is sent
 unchanged, so clients that still add their own prefix are not
-double-prefixed. `GET /models` lists the prefixes in use.
+double-prefixed. For EmbeddingGemma, any input already in its prompt
+format counts, including a custom task (`task: question answering | query: ...`)
+or a real title (`title: Installation | text: ...`). `GET /models` lists the
+prefixes in use.
 
 > For the nomic, ModernBERT and EmbeddingGemma models, a request without
 > `input_type` now gets the document prefix. Requests to the default model
@@ -197,7 +200,7 @@ Environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SEMEMBED_MODEL` | `Snowflake/snowflake-arctic-embed-s` | Model to use (see supported models) |
-| `SEMEMBED_MAX_TOKENS` | model's own window | Lower the context window to bound memory and latency (clamped to the model's window if set higher; must be > 0) |
+| `SEMEMBED_MAX_TOKENS` | model's own window | Lower the context window to bound memory and latency (clamped to the model's window if set higher; startup fails below the model's special-token count + 1, e.g. 3 for the BERT-style models) |
 | `SEMEMBED_PORT` | `8081` | HTTP server port |
 | `RUST_LOG` | `info` | Log level (error, warn, info, debug, trace) |
 

@@ -152,8 +152,21 @@ fn resolve_max_tokens(model_name: &str, native_max_tokens: usize) -> anyhow::Res
 }
 
 fn has_known_prefix(text: &str, spec: &ModelSpec) -> bool {
-    spec.query_prefix.is_some_and(|p| text.starts_with(p))
+    if spec.query_prefix.is_some_and(|p| text.starts_with(p))
         || spec.document_prefix.is_some_and(|p| text.starts_with(p))
+    {
+        return true;
+    }
+    // EmbeddingGemma's prompt format carries a variable field: callers may send their own
+    // task ("task: question answering | query: ...") or a real title
+    // ("title: Installation | text: ..."). Those are already prepared and must not be wrapped.
+    spec.document_prefix == Some(GEMMA_DOCUMENT_PREFIX) && is_gemma_prepared(text)
+}
+
+fn is_gemma_prepared(text: &str) -> bool {
+    let first_line = text.lines().next().unwrap_or_default();
+    (text.starts_with("task: ") && first_line.contains(" | query: "))
+        || (text.starts_with("title: ") && first_line.contains(" | text: "))
 }
 
 // OpenAI-compatible request/response types
@@ -357,6 +370,25 @@ async fn main() -> anyhow::Result<()> {
         .get_truncation()
         .map(|t| t.max_length)
         .unwrap_or(requested_max_tokens);
+
+    // The tokenizer never cuts special tokens: a window that cannot hold them plus one content
+    // token would silently drop text without reporting truncation, so refuse it at startup.
+    let special_tokens: usize = embedder
+        .tokenizer
+        .encode("", true)
+        .map_err(|e| anyhow::anyhow!("Failed to probe tokenizer special tokens: {e}"))?
+        .get_attention_mask()
+        .iter()
+        .map(|&m| m as usize)
+        .sum();
+    anyhow::ensure!(
+        active_max_tokens > special_tokens,
+        "SEMEMBED_MAX_TOKENS={} is too small for {}: the model adds {} special tokens, so the minimum is {}",
+        active_max_tokens,
+        model_name,
+        special_tokens,
+        special_tokens + 1
+    );
 
     info!(
         model = %model_name,
@@ -575,5 +607,40 @@ async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
                 "Failed to convert metrics".to_string(),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gemma_inputs_already_in_prompt_format_are_not_wrapped() {
+        let (_, gemma) = resolve_model("google/embeddinggemma-300m");
+        for prepared in [
+            "title: none | text: Restart the worker",
+            "title: Installation | text: Restart the worker",
+            "task: search result | query: how do I restart the worker",
+            "task: question answering | query: how do I restart the worker",
+        ] {
+            assert!(has_known_prefix(prepared, &gemma), "{prepared:?} should count as prepared");
+        }
+        for plain in [
+            "Restart the worker",
+            "title: a heading in prose\nwith | text: on a later line",
+            "the title: Installation | text: inline",
+        ] {
+            assert!(!has_known_prefix(plain, &gemma), "{plain:?} should get a prefix");
+        }
+    }
+
+    #[test]
+    fn gemma_format_is_not_recognized_for_other_models() {
+        let (_, arctic) = resolve_model("Snowflake/snowflake-arctic-embed-s");
+        assert!(!has_known_prefix("title: Installation | text: Restart", &arctic));
+        assert!(has_known_prefix(
+            "Represent this sentence for searching relevant passages: restart",
+            &arctic
+        ));
     }
 }

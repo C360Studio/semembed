@@ -36,6 +36,10 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked --bin semembed
 
+# Unit tests (CI builds this target; reuses the cached release dependencies)
+FROM builder AS test
+RUN cargo test --release --locked --bin semembed
+
 # Stage 5: Runtime image
 FROM debian:trixie-slim AS runtime
 
