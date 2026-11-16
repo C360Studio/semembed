@@ -157,9 +157,36 @@ tasks:
       - echo ""
       - echo "✅ Models endpoint test passed"
 
+  test:query:
+    desc: Test query prefix handling (input_type=query)
+    cmds:
+      - echo "🧪 Testing query prefix..."
+      - |
+        response=$(curl -sf -X POST http://localhost:{{.PORT}}/v1/embeddings \
+          -H "Content-Type: application/json" \
+          -d '{
+            "input": "how do I restart the ingest worker",
+            "input_type": "query"
+          }')
+        echo "$response" | grep -q '"prefix_applied":true' || (echo "❌ Expected prefix_applied:true" && exit 1)
+      - echo "✅ Query prefix test passed"
+
+  test:truncation:
+    desc: Test truncation reporting and metrics
+    cmds:
+      - echo "🧪 Testing truncation detection..."
+      - |
+        long_text=$(python3 -c 'print(" ".join(f"section_{i} alpha beta gamma delta" for i in range(200)))')
+        response=$(curl -sf -X POST http://localhost:{{.PORT}}/v1/embeddings \
+          -H "Content-Type: application/json" \
+          -d "{\"input\": [\"short text\", \"$long_text\"]}")
+        echo "$response" | grep -q '"truncated":true' || (echo "❌ Expected truncated:true on long input" && exit 1)
+        curl -sf http://localhost:{{.PORT}}/metrics | grep -q 'semembed_inputs_truncated_total' || (echo "❌ Missing truncation metric" && exit 1)
+      - echo "✅ Truncation test passed"
+
   test:all:
     desc: Run all tests
-    deps: [test:health, test:embed, test:batch, test:models]
+    deps: [test:health, test:embed, test:batch, test:models, test:query, test:truncation]
     cmds:
       - echo "✅ All tests passed"
 

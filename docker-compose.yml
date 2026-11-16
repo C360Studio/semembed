@@ -24,7 +24,10 @@ services:
       # - SEMEMBED_MODEL=lightonai/modernbert-embed-large         # 395M params, 1024 dims (MRL), 8192 ctx
       # - SEMEMBED_MODEL=BAAI/bge-small-en-v1.5                   # 33M params, 384 dims, 512 ctx, prior default
       # - SEMEMBED_MODEL=BAAI/bge-base-en-v1.5                    # 109M params, 768 dims, 512 ctx
-      # - SEMEMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2   # 22M params, 384 dims, 512 ctx, oldest/baseline
+      # - SEMEMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2   # 22M params, 384 dims, 256 ctx, oldest/baseline
+
+      # Optional: cap context window below the model's native limit to bound memory/latency
+      # - SEMEMBED_MAX_TOKENS=512
 
       # Server configuration
       - SEMEMBED_PORT=8081
