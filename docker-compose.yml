@@ -29,6 +29,12 @@ services:
       # Optional: cap context window below the model's native limit to bound memory/latency
       # - SEMEMBED_MAX_TOKENS=512
 
+      # Optional: inference pipeline & CPU thread tuning
+      # - SEMEMBED_INTRA_THREADS=2         # Match container CPU limit
+      # - SEMEMBED_MAX_BATCH_TOKENS=4096   # Max padded tokens per ONNX sub-batch
+      # - SEMEMBED_BATCH_WINDOW_MS=5       # Micro-batch coalescing window (ms)
+      # - SEMEMBED_QUEUE_CAPACITY=128      # Max queued requests before HTTP 429
+
       # Server configuration
       - SEMEMBED_PORT=8081
 

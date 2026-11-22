@@ -203,7 +203,11 @@ Prometheus metrics endpoint.
 **Metrics**:
 
 - `semembed_requests_total` - Total embedding requests
-- `semembed_request_duration_seconds` - Request latency histogram
+- `semembed_request_duration_seconds` - End-to-end HTTP request latency histogram
+- `semembed_inference_duration_seconds` - ONNX sub-batch inference duration histogram
+- `semembed_batch_size` - Inputs per ONNX inference sub-batch histogram
+- `semembed_queue_depth` - Current number of requests waiting in the inference queue
+- `semembed_queue_rejected_total` - Requests rejected with HTTP 429 because the inference queue was full
 - `semembed_tokens_processed_total` - Total model tokens processed
 - `semembed_inputs_truncated_total` - Input texts cut to the context window
 - `semembed_errors_total` - Total errors
@@ -216,6 +220,10 @@ Environment variables:
 |----------|---------|-------------|
 | `SEMEMBED_MODEL` | `Snowflake/snowflake-arctic-embed-s` | Model to use (see supported models) |
 | `SEMEMBED_MAX_TOKENS` | model's own window | Lower the context window to bound memory and latency (clamped to the model's window if set higher; startup fails below the model's special-token count + 1, e.g. 3 for the BERT-style models) |
+| `SEMEMBED_MAX_BATCH_TOKENS` | `max(4096, max_tokens)` | Maximum padded token budget (`items × max_seq_len`) per ONNX sub-batch; items are sorted by token length so short inputs are not padded out to long documents |
+| `SEMEMBED_BATCH_WINDOW_MS` | `5` | Coalescing window (ms) for dynamic micro-batching across concurrent requests (`0` disables waiting; `input_type=query` waves always take priority over `document` ingestion) |
+| `SEMEMBED_QUEUE_CAPACITY` | `128` | Maximum queued requests before returning `429 Too Many Requests` (`rate_limit_error`) |
+| `SEMEMBED_INTRA_THREADS` | all available CPU cores | Cap ONNX Runtime intra-op CPU threads (recommended when running with Docker CPU limits) |
 | `SEMEMBED_PORT` | `8081` | HTTP server port |
 | `RUST_LOG` | `info` | Log level (error, warn, info, debug, trace) |
 

@@ -52,10 +52,12 @@ hand-rolling commands.
 - Pass `&Arc<AppState>` via `axum::extract::State`. Do not stash global
   state in `static`/`OnceCell` — the existing `State` extractor pattern
   is the convention.
-- The `TextEmbedding` model is wrapped in a `std::sync::Mutex` because
-  `embed()` takes `&mut self`. This serializes inference. If you need
-  concurrency, prefer a small pool over swapping in `tokio::sync::Mutex`
-  (the work is CPU-bound, not await-bound).
+- `TextEmbedding` runs on a dedicated OS thread (`semembed-worker`) fed by
+  a bounded priority queue (`InferenceQueue`: `query` ahead of `document`,
+  dynamic micro-batching, and length-sorted token-budget sub-batching), while
+  tokenization runs concurrently via `spawn_blocking` on a cloned
+  `Tokenizer`. Keep Tokio async workers free of CPU-bound ONNX/tokenizer work
+  so `/health` and `/metrics` never block.
 - Log with `tracing::{info, warn, error}` macros, not `println!`.
 - Metrics: register on the per-service `Registry` (not the global
   default registry) so `/metrics` returns only this service's metrics.
