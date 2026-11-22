@@ -200,8 +200,114 @@ jobs:
           echo "Checking metrics..."
           echo "$metrics" | grep -q 'semembed_requests_total' || exit 1
           echo "$metrics" | grep -q 'semembed_request_duration_seconds' || exit 1
+          echo "$metrics" | grep -q 'semembed_inference_duration_seconds' || exit 1
+          echo "$metrics" | grep -q 'semembed_batch_size' || exit 1
+          echo "$metrics" | grep -q 'semembed_queue_depth' || exit 1
+          echo "$metrics" | grep -q 'semembed_queue_rejected_total' || exit 1
           echo "$metrics" | grep -q 'semembed_tokens_processed_total' || exit 1
           echo "$metrics" | grep -q '^semembed_inputs_truncated_total 1$' || exit 1
+
+      - name: Test mixed-length sub-batching order and concurrent micro-batching
+        run: |
+          python3 - <<'PY'
+          import concurrent.futures, json, math, time, urllib.request
+
+          def post_embed(payload, port=8081):
+              req = urllib.request.Request(
+                  f"http://localhost:{port}/v1/embeddings",
+                  data=json.dumps(payload).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  return json.loads(resp.read())
+
+          def cosine(a, b):
+              dot = sum(x * y for x, y in zip(a, b))
+              na = math.sqrt(sum(x * x for x in a))
+              nb = math.sqrt(sum(y * y for y in b))
+              return dot / (na * nb)
+
+          # Interleave >512-token truncated documents with short inputs so length-sorted
+          # sub-batching executes short items in a separate sub-batch from long items, then
+          # verify caller index order, truncation flags, and vectors match single-item calls.
+          long_a = " ".join(f"alpha_doc_{i} routing consensus raft quorum" for i in range(180))
+          short_b = "quick status check"
+          long_c = " ".join(f"beta_doc_{i} storage compaction wal snapshot" for i in range(180))
+          short_d = "restart graph index worker"
+          items = [long_a, short_b, long_c, short_d]
+
+          singles = [post_embed({"input": text})["data"][0]["embedding"] for text in items]
+          batched = post_embed({"input": items})
+          assert [d["index"] for d in batched["data"]] == [0, 1, 2, 3], batched["data"]
+          assert batched["data"][0].get("truncated") is True
+          assert "truncated" not in batched["data"][1]
+          assert batched["data"][2].get("truncated") is True
+          assert "truncated" not in batched["data"][3]
+          for idx, (single_vec, entry) in enumerate(zip(singles, batched["data"])):
+              sim = cosine(single_vec, entry["embedding"])
+              assert sim > 0.99999, f"index {idx} cosine mismatch: {sim}"
+
+          # Fire concurrent document + query requests while probing /health to ensure Tokio
+          # workers remain responsive under concurrent inference load.
+          def run_mixed(i):
+              kind = "query" if i % 2 == 0 else "document"
+              body = post_embed({"input": f"concurrent item {i} graph node telemetry", "input_type": kind})
+              return len(body["data"][0]["embedding"])
+
+          with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+              futs = [pool.submit(run_mixed, i) for i in range(8)]
+              t0 = time.perf_counter()
+              with urllib.request.urlopen("http://localhost:8081/health", timeout=3) as hresp:
+                  health = json.loads(hresp.read())
+              health_ms = (time.perf_counter() - t0) * 1000
+              assert health["status"] == "healthy", health
+              assert all(f.result() == 384 for f in futs)
+          print(f"Mixed sub-batch order + concurrent load passed (/health in {health_ms:.1f} ms)")
+          PY
+
+      - name: Test queue capacity backpressure (HTTP 429)
+        run: |
+          docker run -d \
+            --name semembed-qcap \
+            -p 8086:8081 \
+            -e SEMEMBED_QUEUE_CAPACITY=1 \
+            -e SEMEMBED_BATCH_WINDOW_MS=0 \
+            -e SEMEMBED_INTRA_THREADS=1 \
+            semembed:test
+          for i in {1..60}; do
+            curl -sf http://localhost:8086/health >/dev/null && break
+            sleep 2
+          done
+
+          python3 - <<'PY'
+          import concurrent.futures, json, urllib.error, urllib.request
+
+          heavy = [" ".join(f"doc_{j}_{i} graph traversal edge weight" for i in range(120)) for j in range(6)]
+
+          def call_one(_):
+              req = urllib.request.Request(
+                  "http://localhost:8086/v1/embeddings",
+                  data=json.dumps({"input": heavy}).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=60) as resp:
+                      return resp.status, None
+              except urllib.error.HTTPError as err:
+                  return err.code, json.loads(err.read())
+
+          with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+              results = list(pool.map(call_one, range(8)))
+
+          codes = [code for code, _ in results]
+          rejected = [body for code, body in results if code == 429]
+          print("Queue backpressure status codes:", codes)
+          assert 200 in codes, f"Expected at least one 200, got {codes}"
+          assert len(rejected) >= 1, f"Expected at least one 429 overflow, got {codes}"
+          assert rejected[0]["error"]["type"] == "rate_limit_error", rejected[0]
+          PY
+
+          curl -sf http://localhost:8086/metrics | grep -E '^semembed_queue_rejected_total [1-9]' || exit 1
 
       - name: Test SEMEMBED_MAX_TOKENS lower bound
         run: |
@@ -233,9 +339,9 @@ jobs:
           print("SEMEMBED_MAX_TOKENS=3 check passed:", body["usage"])
           PY
 
-      - name: Cleanup lower-bound containers
+      - name: Cleanup auxiliary test containers
         if: always()
-        run: docker rm -f semembed-min-bad semembed-min-ok 2>/dev/null || true
+        run: docker rm -f semembed-qcap semembed-min-bad semembed-min-ok 2>/dev/null || true
 
       - name: View default-model service logs
         if: always()

@@ -184,6 +184,59 @@ tasks:
         curl -sf http://localhost:{{.PORT}}/metrics | grep -q 'semembed_inputs_truncated_total' || (echo "❌ Missing truncation metric" && exit 1)
       - echo "✅ Truncation test passed"
 
+  test:concurrency:
+    desc: Test mixed-length sub-batching order, concurrent micro-batching, and responsive /health
+    cmds:
+      - echo "🧪 Testing mixed-length sub-batching and concurrent micro-batching..."
+      - |
+        python3 - <<'PY'
+        import concurrent.futures, json, math, time, urllib.request
+
+        def post_embed(payload):
+            req = urllib.request.Request(
+                "http://localhost:{{.PORT}}/v1/embeddings",
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read())
+
+        def cosine(a, b):
+            dot = sum(x * y for x, y in zip(a, b))
+            return dot / (math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b)))
+
+        long_a = " ".join(f"alpha_doc_{i} routing consensus raft quorum" for i in range(180))
+        short_b = "quick status check"
+        long_c = " ".join(f"beta_doc_{i} storage compaction wal snapshot" for i in range(180))
+        short_d = "restart graph index worker"
+        items = [long_a, short_b, long_c, short_d]
+
+        singles = [post_embed({"input": t})["data"][0]["embedding"] for t in items]
+        batched = post_embed({"input": items})
+        assert [d["index"] for d in batched["data"]] == [0, 1, 2, 3]
+        assert batched["data"][0].get("truncated") is True and "truncated" not in batched["data"][1]
+        for s, entry in zip(singles, batched["data"]):
+            assert cosine(s, entry["embedding"]) > 0.99999
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+            futs = [
+                pool.submit(
+                    post_embed,
+                    {"input": f"concurrent item {i}", "input_type": "query" if i % 2 == 0 else "document"},
+                )
+                for i in range(8)
+            ]
+            t0 = time.perf_counter()
+            health = json.loads(urllib.request.urlopen("http://localhost:{{.PORT}}/health", timeout=3).read())
+            dt_ms = (time.perf_counter() - t0) * 1000
+            assert health["status"] == "healthy"
+            for f in futs:
+                assert len(f.result()["data"][0]["embedding"]) > 0
+        print(f"  /health responded in {dt_ms:.1f} ms under 8 concurrent requests")
+        PY
+      - curl -sf http://localhost:{{.PORT}}/metrics | grep -q 'semembed_batch_size' || (echo "❌ Missing batch_size metric" && exit 1)
+      - echo "✅ Concurrency & sub-batching test passed"
+
   bench:context:
     desc: Measure peak memory and latency per context window (fresh container per window)
     deps: [build]
@@ -224,7 +277,7 @@ tasks:
 
   test:all:
     desc: Run all tests
-    deps: [test:health, test:embed, test:batch, test:models, test:query, test:truncation]
+    deps: [test:health, test:embed, test:batch, test:models, test:query, test:truncation, test:concurrency]
     cmds:
       - echo "✅ All tests passed"
 
