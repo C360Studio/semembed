@@ -56,6 +56,21 @@ curl http://localhost:8081/v1/embeddings \
   }'
 ```
 
+### Image tags
+
+Images are published to `ghcr.io/c360studio/semembed`:
+
+| Tag | Published on | Use |
+|-----|--------------|-----|
+| `X.Y.Z` (e.g. `0.2.0`) | a `vX.Y.Z` release | Pin this in deployments |
+| `X.Y` (e.g. `0.2`) | the latest `X.Y.*` release | Pick up patch fixes |
+| `main-<sha>` | every push to `main` | A specific unreleased commit |
+| `latest` | every push to `main` | Local trials only; it changes without notice |
+
+Releases follow semver, with 0.x until the API settles: a minor bump
+(`0.x.0`) can change behavior or embedding vectors, a patch bump
+(`0.x.y`) does not. To cut one: `gh release create vX.Y.Z --generate-notes`.
+
 ### Building from Source
 
 ```bash
